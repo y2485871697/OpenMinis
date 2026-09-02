@@ -1943,4 +1943,13 @@
     <string name="context_compression_empty_hint">No models or groups added</string>
     <string name="context_compression_add_models_title">Add Context Compression Models</string>
     <string name="context_compression_add_groups_title">Add Context Compression Groups</string>
-</resources>
+    <string name="provider_balance_section">Account balance</string>
+    <string name="provider_balance_enabled">Fetch account balance</string>
+    <string name="provider_balance_api_path">Balance API path</string>
+    <string name="provider_balance_json_path">Result JSON key</string>
+    <string name="provider_balance_footer">Sends an authenticated GET request. The JSON key supports dot notation and array indexes, for example balance_infos[0].total_balance.</string>
+    <string name="provider_balance_refresh">Refresh balance</string>
+    <string name="provider_balance_loading">Fetching balance…</string>
+    <string name="provider_balance_not_loaded">Balance not loaded</string>
+    <string name="provider_balance_error">Unavailable: %1$s</string>
+    <string name="provider_balance_content_description">Account balance</string></resources>
