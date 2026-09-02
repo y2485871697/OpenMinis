@@ -4,6 +4,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.provider.OpenableColumns
 import java.io.File
 import androidx.core.content.ContextCompat
@@ -48,7 +51,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -141,6 +146,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Switch
 import com.openminis.app.ui.settings.SettingsSwitch
+import com.openminis.app.ui.settings.streamingHapticsEnabled
 import com.openminis.app.BuildConfig
 import com.openminis.app.R
 import com.openminis.app.data.FileMentionIndex
@@ -177,7 +183,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
+
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.compositionLocalOf
@@ -215,8 +221,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -604,25 +609,40 @@ fun ChatScreen(
         }
     }
 
-    // RikkaHub-style generation haptics: observe rendered stream growth and
-    // emit at most one light keyboard tap every 50 ms.
-    val hapticFeedback = LocalHapticFeedback.current
-    val streamingHapticSignal by rememberUpdatedState(
-        messages.lastOrNull()?.let { message ->
-            message.content.length + message.toolBlocks.sumOf { it.content.length }
-        } ?: 0,
-    )
-    LaunchedEffect(isStreaming) {
-        if (isStreaming) {
-            snapshotFlow { streamingHapticSignal }
-                .distinctUntilChanged()
-                .sample(50L)
-                .collectLatest { signal ->
-                    if (signal > 0) {
-                        hapticFeedback.performHapticFeedback(HapticFeedbackType.KeyboardTap)
+    // The canonical message list intentionally stays static during generation;
+    // live tokens are published through streamingById. Listening to messages
+    // only produced a start/end tick, so most devices never felt feedback.
+    // Use a short vibrator pulse here instead of KeyboardTap: several OEM ROMs
+    // suppress keyboard haptics for apps even when ordinary vibration is allowed.
+    val streamingVibrator = remember(context) {
+        context.getSystemService(Vibrator::class.java)
+    }
+    LaunchedEffect(viewModel, streamingVibrator) {
+        viewModel.streamingById
+            .map { streams ->
+                streams.values.sumOf { delta ->
+                    delta.content.length + delta.toolBlocks.sumOf { block ->
+                        block.content.length + block.toolArgs.length
                     }
                 }
-        }
+            }
+            .distinctUntilChanged()
+            .filter { it > 0 }
+            .sample(50L)
+            .collectLatest {
+                if (streamingHapticsEnabled(context)) {
+                    streamingVibrator?.takeIf { it.hasVibrator() }?.let { vibrator ->
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            vibrator.vibrate(
+                                VibrationEffect.createOneShot(10L, 96),
+                            )
+                        } else {
+                            @Suppress("DEPRECATION")
+                            vibrator.vibrate(10L)
+                        }
+                    }
+                }
+            }
     }
 
     // [T-android-voice-panel] Shared 3-stage RECORD_AUDIO permission flow
