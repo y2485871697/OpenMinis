@@ -59,19 +59,54 @@ internal object ProviderBalanceClient {
     }
 
     internal fun extractDisplayValue(json: String, path: String): String {
-        var current: Any? = JSONTokener(json).nextValue()
-        val tokens = Regex("([^\\[.\\]]+)|\\[(\\d+)]").findAll(path.trim()).toList()
-        require(tokens.isNotEmpty()) { "Balance JSON key is empty" }
-        tokens.forEach { match ->
+        var current: Any? = unwrapJsonValue(JSONTokener(json).nextValue())
+        val normalizedPath = path.trim().removePrefix("$").trimStart('.')
+        val tokens = Regex("([^\\[.\\]]+)|\\[(\\d+)]").findAll(normalizedPath).toList()
+
+        // A root path ("$") is useful for providers whose balance endpoint
+        // returns a bare number/string instead of a JSON object.
+        if (tokens.isEmpty()) return formatDisplayValue(current)
+
+        tokens.forEachIndexed { tokenIndex, match ->
             val key = match.groupValues[1]
             val indexText = match.groupValues[2]
             current = if (key.isNotEmpty()) {
-                val obj = current as? JSONObject
-                    ?: throw IllegalArgumentException("Expected an object before '$key'")
-                if (!obj.has(key)) throw IllegalArgumentException("JSON key '$key' was not found")
-                obj.get(key)
+                when (val container = unwrapJsonValue(current)) {
+                    is JSONObject -> {
+                        if (!container.has(key)) {
+                            throw IllegalArgumentException("JSON key '$key' was not found")
+                        }
+                        container.get(key)
+                    }
+                    is JSONArray -> {
+                        // Several gateways wrap account records in a top-level
+                        // array. Resolve a named key from the first matching
+                        // object so a simple path such as "remaining" works.
+                        val matchObject = (0 until container.length())
+                            .asSequence()
+                            .mapNotNull { unwrapJsonValue(container.opt(it)) as? JSONObject }
+                            .firstOrNull { it.has(key) }
+                        when {
+                            matchObject != null -> matchObject.get(key)
+                            container.length() == 1 &&
+                                tokenIndex == 0 &&
+                                tokens.size == 1 -> container.get(0)
+                            else -> throw IllegalArgumentException(
+                                "JSON key '$key' was not found in the response array",
+                            )
+                        }
+                    }
+                    else -> {
+                        // Some compatible providers return the remaining balance
+                        // directly (for example: 9.26 or "9.26"). In that shape
+                        // there is no object key to traverse, so a single configured
+                        // key names the root value for compatibility.
+                        if (tokenIndex == 0 && tokens.size == 1) container
+                        else throw IllegalArgumentException("Expected an object before '$key'")
+                    }
+                }
             } else {
-                val array = current as? JSONArray
+                val array = unwrapJsonValue(current) as? JSONArray
                     ?: throw IllegalArgumentException("Expected an array before [$indexText]")
                 val index = indexText.toInt()
                 if (index !in 0 until array.length()) {
@@ -79,15 +114,39 @@ internal object ProviderBalanceClient {
                 }
                 array.get(index)
             }
+            current = unwrapJsonValue(current)
         }
-        if (current == null || current === JSONObject.NULL) {
+        return formatDisplayValue(current)
+    }
+
+    /**
+     * Some proxy APIs JSON-encode their payload twice. Unwrap a few bounded
+     * layers so "{\"remaining\":9.26}" behaves like a normal object response.
+     */
+    private fun unwrapJsonValue(value: Any?): Any? {
+        var current = value
+        repeat(3) {
+            val text = current as? String ?: return current
+            val trimmed = text.trim()
+            val looksLikeJson =
+                (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+                    (trimmed.startsWith("[") && trimmed.endsWith("]"))
+            if (!looksLikeJson) return current
+            current = runCatching { JSONTokener(trimmed).nextValue() }
+                .getOrElse { return current }
+        }
+        return current
+    }
+
+    private fun formatDisplayValue(value: Any?): String {
+        if (value == null || value === JSONObject.NULL) {
             throw IllegalArgumentException("Balance value is null")
         }
-        return when (current) {
+        return when (value) {
             is Number -> runCatching {
-                BigDecimal(current.toString()).stripTrailingZeros().toPlainString()
-            }.getOrDefault(current.toString())
-            is String -> current.trim().takeIf { it.isNotEmpty() }
+                BigDecimal(value.toString()).stripTrailingZeros().toPlainString()
+            }.getOrDefault(value.toString())
+            is String -> value.trim().takeIf { it.isNotEmpty() }
                 ?: throw IllegalArgumentException("Balance value is empty")
             else -> throw IllegalArgumentException("Balance value must be a number or string")
         }
