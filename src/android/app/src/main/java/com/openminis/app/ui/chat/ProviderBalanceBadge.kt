@@ -2,6 +2,7 @@ package com.openminis.app.ui.chat
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Savings
 import androidx.compose.material3.Icon
@@ -28,7 +29,7 @@ internal fun ProviderBalanceBadge(
         Icon(
             imageVector = Icons.Outlined.Savings,
             contentDescription = null,
-            modifier = Modifier,
+            modifier = Modifier.size(11.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
