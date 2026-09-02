@@ -414,6 +414,11 @@ data class ProviderConfig(
     // command) — mirrors iOS agentLoopModelEntryIds / agentLoopGroupIds.
     val agentLoopModelEntryIds: MutableList<String> = mutableListOf(),
     val agentLoopGroupIds: MutableList<String> = mutableListOf(),
+    // Models and groups used exclusively to summarize/compact long chat context.
+    // Kept separate from the agent-loop set so users can choose a cheaper or
+    // faster summarizer without exposing it to minis-model-use tool calls.
+    val contextCompressionModelEntryIds: MutableList<String> = mutableListOf(),
+    val contextCompressionGroupIds: MutableList<String> = mutableListOf(),
     // T273: bumped by ProviderRepository.saveConfig on every mutation so
     // data-class structural equals returns false even when callers mutate
     // inner MutableLists in place. Without this, MutableStateFlow's
