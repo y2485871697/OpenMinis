@@ -3226,29 +3226,53 @@ class ChatViewModel(
                     "was done\", NOT as an ongoing goal or todo list."
             )
         }
-        val model = currentModel
-        val contextWindow = model?.contextWindow ?: 128_000
-        val estimatedInput = userMessage.length / 4
-        val maxOut = maxOf(1024, minOf(8192, contextWindow - estimatedInput))
-        val provider = currentProvider
-            ?: throw IllegalStateException("No LLM provider available for compaction")
-        val response = provider.sendMessage(
-            messages = listOf(
-                LLMMessage(role = LLMMessage.Role.USER, content = userMessage)
-            ),
-            systemPrompt = compactSummarySystemPrompt,
-            maxTokens = maxOut,
-            // Mirror iOS AIChatViewModel.swift:12926 — null lets the
-            // provider/model use its default. gpt-5.x family rejects any
-            // temperature != 1 with HTTP 400, and Android
-            // OpenAIProvider.buildRequestBody omits the field entirely when
-            // temperature is null.
-            temperature = null,
-            imageParts = emptyList(),
-            tools = emptyList(),
-            thinkingLevel = ThinkingLevel.OFF,
-        )
-        return response.text
+        val providers = buildList {
+            for (entry in providerRepository.resolvedContextCompressionEntries()) {
+                val instance = providerRepository.instance(entry.providerInstanceId) ?: continue
+                val apiKey = providerRepository.usableApiKey(instance) ?: ""
+                runCatching {
+                    ProviderFactory.create(instance, apiKey, entry.model, context)
+                }.getOrNull()?.let(::add)
+            }
+            // Empty/unusable custom configuration must never break compaction.
+            // The current chat model remains the final fallback.
+            currentProvider?.let(::add)
+        }
+        if (providers.isEmpty()) {
+            throw IllegalStateException("No LLM provider available for compaction")
+        }
+
+        var lastError: Throwable? = null
+        for (provider in providers) {
+            val contextWindow = provider.model.contextWindow ?: 128_000
+            val estimatedInput = userMessage.length / 4
+            val maxOut = maxOf(1024, minOf(8192, contextWindow - estimatedInput))
+            try {
+                val response = provider.sendMessage(
+                    messages = listOf(
+                        LLMMessage(role = LLMMessage.Role.USER, content = userMessage)
+                    ),
+                    systemPrompt = compactSummarySystemPrompt,
+                    maxTokens = maxOut,
+                    // null lets the provider/model use its default. GPT-5.x
+                    // rejects non-default temperature values.
+                    temperature = null,
+                    imageParts = emptyList(),
+                    tools = emptyList(),
+                    thinkingLevel = ThinkingLevel.OFF,
+                )
+                if (response.text.isNotBlank()) return response.text
+                lastError = IllegalStateException("Compaction model returned an empty response")
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                lastError = error
+                AppLogger.warning(
+                    TAG,
+                    "[Compact] ${provider.model.displayName} failed; trying next configured model: ${error.message}",
+                )
+            }
+        }
+        throw lastError ?: IllegalStateException("All context compression models failed")
     }
 
     /**

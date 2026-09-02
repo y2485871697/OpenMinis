@@ -144,7 +144,8 @@ fun ProviderConfig.toSnapshot(
     }
 
     val loopRows = ArrayList<ProviderAgentLoopIdEntity>(
-        agentLoopModelEntryIds.size + agentLoopGroupIds.size,
+        agentLoopModelEntryIds.size + agentLoopGroupIds.size +
+            contextCompressionModelEntryIds.size + contextCompressionGroupIds.size,
     )
     agentLoopModelEntryIds.forEachIndexed { idx, id ->
         loopRows.add(
@@ -159,6 +160,24 @@ fun ProviderConfig.toSnapshot(
         loopRows.add(
             ProviderAgentLoopIdEntity(
                 kind = "group",
+                targetId = id,
+                sortOrder = idx,
+            )
+        )
+    }
+    contextCompressionModelEntryIds.forEachIndexed { idx, id ->
+        loopRows.add(
+            ProviderAgentLoopIdEntity(
+                kind = "compact_entry",
+                targetId = idMap[id] ?: id,
+                sortOrder = idx,
+            )
+        )
+    }
+    contextCompressionGroupIds.forEachIndexed { idx, id ->
+        loopRows.add(
+            ProviderAgentLoopIdEntity(
+                kind = "compact_group",
                 targetId = id,
                 sortOrder = idx,
             )
@@ -264,6 +283,14 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
         .sortedBy { it.sortOrder }
         .map { it.targetId }
         .toMutableList()
+    val compactEntryIds = this.loopIds.filter { it.kind == "compact_entry" }
+        .sortedBy { it.sortOrder }
+        .map { it.targetId }
+        .toMutableList()
+    val compactGroupIds = this.loopIds.filter { it.kind == "compact_group" }
+        .sortedBy { it.sortOrder }
+        .map { it.targetId }
+        .toMutableList()
 
     val metaMap = this.meta.associate { it.key to it.value }
     return ProviderConfig(
@@ -277,6 +304,8 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
         visionGroupId = metaMap[ProviderConfigMetaKeys.VISION_GROUP_ID],
         agentLoopModelEntryIds = entryLoopIds,
         agentLoopGroupIds = groupLoopIds,
+        contextCompressionModelEntryIds = compactEntryIds,
+        contextCompressionGroupIds = compactGroupIds,
     )
 }
 

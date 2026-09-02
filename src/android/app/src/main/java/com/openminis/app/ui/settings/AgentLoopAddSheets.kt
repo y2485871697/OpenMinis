@@ -63,14 +63,23 @@ import com.openminis.app.ui.components.MinisTextButton
 fun AddAgentLoopModelsScreen(
     providerRepository: ProviderRepository,
     onBack: () -> Unit,
+    contextCompression: Boolean = false,
 ) {
     val config by providerRepository.config.collectAsState()
 
-    val pinnedEntries = config.agentLoopModelEntryIds.toSet()
+    val pinnedEntries = if (contextCompression) {
+        config.contextCompressionModelEntryIds.toSet()
+    } else {
+        config.agentLoopModelEntryIds.toSet()
+    }
     // Skip entries already reachable through a pinned group — adding a
     // direct pin on top of group membership would be a no-op for the
     // resolved usable set and just clutters the section UI.
-    val groupBackedEntries: Set<String> = config.agentLoopGroupIds
+    val groupBackedEntries: Set<String> = (if (contextCompression) {
+        config.contextCompressionGroupIds
+    } else {
+        config.agentLoopGroupIds
+    })
         .mapNotNull { gid -> config.modelGroups.find { it.id == gid } }
         .flatMap { it.memberEntryIds }
         .toSet()
@@ -89,7 +98,10 @@ fun AddAgentLoopModelsScreen(
             TopAppBar(
                 title = {
                     Text(
-                        stringResource(R.string.agent_loop_section_add_models_title),
+                        stringResource(
+                            if (contextCompression) R.string.context_compression_add_models_title
+                            else R.string.agent_loop_section_add_models_title,
+                        ),
                         fontWeight = FontWeight.SemiBold,
                     )
                 },
@@ -112,7 +124,8 @@ fun AddAgentLoopModelsScreen(
                                 .map { it.id }
                                 .filter { it in selectedIds }
                             for (id in orderedToAdd) {
-                                providerRepository.addAgentLoopEntry(id)
+                                if (contextCompression) providerRepository.addContextCompressionEntry(id)
+                                else providerRepository.addAgentLoopEntry(id)
                             }
                             onBack()
                         },
@@ -165,9 +178,14 @@ fun AddAgentLoopModelsScreen(
 fun AddAgentLoopGroupsScreen(
     providerRepository: ProviderRepository,
     onBack: () -> Unit,
+    contextCompression: Boolean = false,
 ) {
     val config by providerRepository.config.collectAsState()
-    val pinnedGroups = config.agentLoopGroupIds.toSet()
+    val pinnedGroups = if (contextCompression) {
+        config.contextCompressionGroupIds.toSet()
+    } else {
+        config.agentLoopGroupIds.toSet()
+    }
     val available = remember(config, pinnedGroups) {
         config.modelGroups.filter { it.id !in pinnedGroups }
     }
@@ -178,7 +196,10 @@ fun AddAgentLoopGroupsScreen(
             TopAppBar(
                 title = {
                     Text(
-                        stringResource(R.string.agent_loop_section_add_groups_title),
+                        stringResource(
+                            if (contextCompression) R.string.context_compression_add_groups_title
+                            else R.string.agent_loop_section_add_groups_title,
+                        ),
                         fontWeight = FontWeight.SemiBold,
                     )
                 },
@@ -201,7 +222,8 @@ fun AddAgentLoopGroupsScreen(
                                 .map { it.id }
                                 .filter { it in selectedIds }
                             for (id in orderedToAdd) {
-                                providerRepository.addAgentLoopGroup(id)
+                                if (contextCompression) providerRepository.addContextCompressionGroup(id)
+                                else providerRepository.addAgentLoopGroup(id)
                             }
                             onBack()
                         },

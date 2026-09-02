@@ -584,6 +584,8 @@ class ProviderRepository(private val context: Context) {
                 modelGroups = canonical.modelGroups.toMutableList(),
                 agentLoopModelEntryIds = canonical.agentLoopModelEntryIds.toMutableList(),
                 agentLoopGroupIds = canonical.agentLoopGroupIds.toMutableList(),
+                contextCompressionModelEntryIds = canonical.contextCompressionModelEntryIds.toMutableList(),
+                contextCompressionGroupIds = canonical.contextCompressionGroupIds.toMutableList(),
                 revision = ProviderConfig.nextRevision(),
             )
         }
@@ -631,6 +633,8 @@ class ProviderRepository(private val context: Context) {
                 .toMutableList(),
             agentLoopModelEntryIds = live.agentLoopModelEntryIds.toMutableList(),
             agentLoopGroupIds = live.agentLoopGroupIds.toMutableList(),
+            contextCompressionModelEntryIds = live.contextCompressionModelEntryIds.toMutableList(),
+            contextCompressionGroupIds = live.contextCompressionGroupIds.toMutableList(),
         )
     }
 
@@ -820,6 +824,7 @@ class ProviderRepository(private val context: Context) {
                 group.memberEntryIds.removeAll { it in removedEntryIds }
             }
             config.agentLoopModelEntryIds.removeAll { it in removedEntryIds }
+            config.contextCompressionModelEntryIds.removeAll { it in removedEntryIds }
         }
         val emptyGroupIds = config.modelGroups.filter { it.memberEntryIds.isEmpty() }.map { it.id }.toSet()
         if (emptyGroupIds.isNotEmpty()) {
@@ -1243,6 +1248,7 @@ class ProviderRepository(private val context: Context) {
         // no longer exists. Mirrors iOS ProviderConfigStore.removeEntry
         // (Providers/ProviderConfigStore.swift L268).
         config.agentLoopModelEntryIds.removeAll { it == entryId }
+        config.contextCompressionModelEntryIds.removeAll { it == entryId }
         saveConfig(config)
     }
 
@@ -1291,6 +1297,7 @@ class ProviderRepository(private val context: Context) {
             config.visionGroupId = null
         }
         config.agentLoopGroupIds.removeAll { it == groupId }
+        config.contextCompressionGroupIds.removeAll { it == groupId }
         saveConfig(config)
     }
 
@@ -1371,6 +1378,43 @@ class ProviderRepository(private val context: Context) {
         val cur = _config.value.agentLoopGroupIds.toSet()
         if (newOrder.toSet() != cur) return
         setAgentLoopGroupIds(newOrder)
+    }
+    /** Replace the context-compaction direct-model selection, preserving order. */
+    fun setContextCompressionEntryIds(ids: List<String>): Unit = synchronized(configLock) {
+        ensureConfigLoaded()
+        val config = workingCopy()
+        config.contextCompressionModelEntryIds.clear()
+        config.contextCompressionModelEntryIds.addAll(ids.distinct())
+        saveConfig(config)
+    }
+
+    /** Replace the context-compaction group selection, preserving order. */
+    fun setContextCompressionGroupIds(ids: List<String>): Unit = synchronized(configLock) {
+        ensureConfigLoaded()
+        val config = workingCopy()
+        config.contextCompressionGroupIds.clear()
+        config.contextCompressionGroupIds.addAll(ids.distinct())
+        saveConfig(config)
+    }
+
+    fun addContextCompressionEntry(entryId: String) {
+        val current = _config.value.contextCompressionModelEntryIds.toList()
+        if (entryId !in current) setContextCompressionEntryIds(current + entryId)
+    }
+
+    fun removeContextCompressionEntry(entryId: String) {
+        val current = _config.value.contextCompressionModelEntryIds.toList()
+        if (entryId in current) setContextCompressionEntryIds(current.filterNot { it == entryId })
+    }
+
+    fun addContextCompressionGroup(groupId: String) {
+        val current = _config.value.contextCompressionGroupIds.toList()
+        if (groupId !in current) setContextCompressionGroupIds(current + groupId)
+    }
+
+    fun removeContextCompressionGroup(groupId: String) {
+        val current = _config.value.contextCompressionGroupIds.toList()
+        if (groupId in current) setContextCompressionGroupIds(current.filterNot { it == groupId })
     }
 
     /**
@@ -1517,6 +1561,30 @@ class ProviderRepository(private val context: Context) {
         return out
     }
 
+    /**
+     * Ordered, unique, currently usable models configured for context
+     * compression. Direct models are tried first, followed by group members.
+     */
+    fun resolvedContextCompressionEntries(): List<ModelEntry> {
+        val config = _config.value
+        val seen = mutableSetOf<String>()
+        val result = mutableListOf<ModelEntry>()
+
+        fun consider(id: String) {
+            val entry = config.modelEntries.find { it.id == id } ?: return
+            val instance = config.instances.find { it.id == entry.providerInstanceId } ?: return
+            if (!instance.isEnabled || entry.isHidden || !hasAnyCredential(instance)) return
+            if (seen.add(entry.id)) result.add(entry)
+        }
+
+        config.contextCompressionModelEntryIds.forEach(::consider)
+        for (groupId in config.contextCompressionGroupIds) {
+            config.modelGroups.find { it.id == groupId }
+                ?.memberEntryIds
+                ?.forEach(::consider)
+        }
+        return result
+    }
     fun group(id: String): ModelGroup? =
         _config.value.modelGroups.find { it.id == id }
 
@@ -2755,6 +2823,10 @@ class ProviderRepository(private val context: Context) {
                 (local.agentLoopModelEntryIds + remote.agentLoopModelEntryIds).distinct()
             val mergedAgentGroups =
                 (local.agentLoopGroupIds + remote.agentLoopGroupIds).distinct()
+            val mergedCompactEntries =
+                (local.contextCompressionModelEntryIds + remote.contextCompressionModelEntryIds).distinct()
+            val mergedCompactGroups =
+                (local.contextCompressionGroupIds + remote.contextCompressionGroupIds).distinct()
 
             val merged = local.copy(
                 instances = orderedInstances,
@@ -2762,6 +2834,8 @@ class ProviderRepository(private val context: Context) {
                 modelGroups = orderedGroups,
                 agentLoopModelEntryIds = mergedAgentEntries.toMutableList(),
                 agentLoopGroupIds = mergedAgentGroups.toMutableList(),
+                contextCompressionModelEntryIds = mergedCompactEntries.toMutableList(),
+                contextCompressionGroupIds = mergedCompactGroups.toMutableList(),
             )
             saveConfig(merged)
             val after = orderedInstances.size
