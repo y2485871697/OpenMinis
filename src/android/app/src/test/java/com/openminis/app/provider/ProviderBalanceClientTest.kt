@@ -27,6 +27,33 @@ class ProviderBalanceClientTest {
     }
 
     @Test
+    fun acceptsBareNumericBalanceWithConfiguredKey() {
+        assertEquals(
+            "9.26",
+            ProviderBalanceClient.extractDisplayValue("9.2600", "remaining"),
+        )
+    }
+
+    @Test
+    fun findsNamedBalanceInTopLevelArray() {
+        assertEquals(
+            "9.26",
+            ProviderBalanceClient.extractDisplayValue(
+                """[{"remaining":9.2600}]""",
+                "remaining",
+            ),
+        )
+    }
+
+    @Test
+    fun acceptsRootPathForBareBalance() {
+        assertEquals(
+            "9.26",
+            ProviderBalanceClient.extractDisplayValue("9.2600", "$"),
+        )
+    }
+
+    @Test
     fun reportsMissingKey() {
         assertThrows(IllegalArgumentException::class.java) {
             ProviderBalanceClient.extractDisplayValue("""{"balance":1}""", "account.balance")
