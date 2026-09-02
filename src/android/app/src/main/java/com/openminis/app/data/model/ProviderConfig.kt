@@ -229,6 +229,12 @@ data class ProviderInstance(
     // compat providers. Field name matches iOS for cross-platform
     // export/import interop.
     var customUserAgent: String? = null,
+    // Optional account-balance endpoint shown in provider settings and chat UI.
+    // The path may be absolute or relative to the provider base URL. JSON paths
+    // support dotted keys and array indices, e.g. balance_infos[0].total_balance.
+    var balanceEnabled: Boolean = false,
+    var balanceApiPath: String? = null,
+    var balanceJsonPath: String? = null,
     // OpenAI-only: when true, traffic goes through /v1/responses instead of
     // /v1/chat/completions. Mirrors iOS `ProviderType.openAIResponses` flag,
     // but modeled here as a switch on the instance so an existing OpenAI
