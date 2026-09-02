@@ -177,6 +177,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.compositionLocalOf
@@ -214,6 +215,8 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -579,7 +582,48 @@ fun ChatScreen(
     val memoryToolRecords by viewModel.memoryToolRecords.collectAsState()
     val selectedGroupName by viewModel.selectedGroupName.collectAsState()
     val providerName by viewModel.providerName.collectAsState()
+    val activeEntryId by viewModel.activeEntryId.collectAsState()
+    val providerConfig by providerRepository.config.collectAsState()
+    val balanceStates by providerRepository.balanceStates.collectAsState()
+    val activeProviderInstance = providerConfig.modelEntries
+        .firstOrNull { it.id == activeEntryId }
+        ?.let { entry -> providerConfig.instances.firstOrNull { it.id == entry.providerInstanceId } }
+    val activeBalanceValue = activeProviderInstance
+        ?.takeIf { it.balanceEnabled }
+        ?.let { balanceStates[it.id]?.value }
     val snackbarHostState = remember { SnackbarHostState() }
+
+    LaunchedEffect(
+        activeProviderInstance?.id,
+        activeProviderInstance?.balanceEnabled,
+        activeProviderInstance?.balanceApiPath,
+        activeProviderInstance?.balanceJsonPath,
+    ) {
+        activeProviderInstance?.takeIf { it.balanceEnabled }?.let {
+            providerRepository.refreshBalance(it.id)
+        }
+    }
+
+    // RikkaHub-style generation haptics: observe rendered stream growth and
+    // emit at most one light keyboard tap every 50 ms.
+    val hapticFeedback = LocalHapticFeedback.current
+    val streamingHapticSignal by rememberUpdatedState(
+        messages.lastOrNull()?.let { message ->
+            message.content.length + message.toolBlocks.sumOf { it.content.length }
+        } ?: 0,
+    )
+    LaunchedEffect(isStreaming) {
+        if (isStreaming) {
+            snapshotFlow { streamingHapticSignal }
+                .distinctUntilChanged()
+                .sample(50L)
+                .collectLatest { signal ->
+                    if (signal > 0) {
+                        hapticFeedback.performHapticFeedback(HapticFeedbackType.KeyboardTap)
+                    }
+                }
+        }
+    }
 
     // [T-android-voice-panel] Shared 3-stage RECORD_AUDIO permission flow
     // (system dialog → post-DENY poll → in-app settings gate). Extracted from
@@ -2758,6 +2802,12 @@ fun ChatScreen(
                                             // badge to the right stays intrinsic.
                                             modifier = Modifier.weight(1f, fill = false),
                                         )
+                                        activeBalanceValue?.let { balance ->
+                                            ProviderBalanceBadge(
+                                                value = balance,
+                                                modifier = Modifier.widthIn(max = 84.dp),
+                                            )
+                                        }
                                         // Show the badge whenever thinking is on,
                                         // and ALSO when it's Off but the active
                                         // model supports deep thinking (iOS
@@ -3927,10 +3977,8 @@ fun ChatScreen(
                             sessionId,
                             item::class.java.simpleName,
                         )
-                        // 0.4f matches iOS .opacity(0.5) closely once Compose's
-                        // sRGB compositing is factored in. Renders below normal
-                        // intensity but the message stays selectable + readable.
-                        val rowAlpha = if (item.isCompacted()) 0.4f else 1f
+                        // Compacted history remains fully legible; the divider already marks the boundary.
+                        val rowAlpha = 1f
                         // [T-HANG-DIAG] log on first composition of any item
                         // whose content is large enough to be a likely hang
                         // suspect. SideEffect runs after the first successful
@@ -6854,8 +6902,6 @@ fun ChatScreen(
     // Model Picker bottom sheet
     if (showModelPicker) {
         val config by providerRepository.config.collectAsState()
-        val activeEntryId by viewModel.activeEntryId.collectAsState()
-
         // When the user picks a model whose output is image/audio/video, defer
         // the actual binding behind a confirmation dialog — those models can't
         // drive an Agent loop, so we steer the user toward a text-output model

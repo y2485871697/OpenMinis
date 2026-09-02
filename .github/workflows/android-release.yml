@@ -52,6 +52,10 @@ jobs:
           ./deps/build_proot.sh
           ./scripts/prepare_android_sandbox.sh
 
+      - name: Test provider balance parsing
+        working-directory: src/android
+        run: ./gradlew :app:testDebugUnitTest --tests "com.openminis.app.provider.ProviderBalanceClientTest" --stacktrace
+
       - name: Assemble stable APK
         working-directory: src/android
         run: ./gradlew :app:assembleRelease --stacktrace

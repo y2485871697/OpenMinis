@@ -312,6 +312,7 @@ internal fun ModelPickerSheet(
     onEditGroups: (() -> Unit)? = null,
 ) {
     val openTime = remember { System.nanoTime() }
+    val balanceStates by providerRepository.balanceStates.collectAsState()
 
     LaunchedEffect(Unit) {
         AppLogger.info("ModelPicker", "[ModelPicker] open triggered")
@@ -319,6 +320,7 @@ internal fun ModelPickerSheet(
             val ms = (frameTime - openTime) / 1_000_000.0
             AppLogger.info("ModelPicker", "[ModelPicker] first frame rendered: ${"%.1f".format(ms)}ms (total since trigger)")
         }
+        providerRepository.refreshConfiguredBalances()
     }
 
     var searchText by remember { mutableStateOf("") }
@@ -1045,6 +1047,13 @@ internal fun ModelPickerSheet(
                                             // where every OTHER model row in this
                                             // sheet carries a bolt. iOS puts the
                                             // bolt here for the same reason.
+                                            balanceStates[instance.id]?.value?.let { balance ->
+                                                ProviderBalanceBadge(
+                                                    value = balance,
+                                                    modifier = Modifier.widthIn(max = 84.dp),
+                                                )
+                                                Spacer(Modifier.width(4.dp))
+                                            }
                                             QuickTestButton(onClick = { quickTestEntry = displayEntry })
                                         }
                                         // Only when there is something to show:
@@ -1182,6 +1191,13 @@ internal fun ModelPickerSheet(
                                                         )
                                                         .padding(horizontal = 5.dp, vertical = 1.dp),
                                                 )
+                                            }
+                                            balanceStates[instance.id]?.value?.let { balance ->
+                                                ProviderBalanceBadge(
+                                                    value = balance,
+                                                    modifier = Modifier.widthIn(max = 84.dp),
+                                                )
+                                                Spacer(Modifier.width(4.dp))
                                             }
                                             QuickTestButton(onClick = { quickTestEntry = entry })
                                         }

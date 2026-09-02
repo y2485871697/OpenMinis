@@ -35,6 +35,8 @@ import com.openminis.app.data.model.isVoiceTemplateSeedShape
 import com.openminis.app.data.model.withInferredVoiceModality
 import com.openminis.app.provider.ModelReleaseIndex
 import com.openminis.app.provider.ModelsDevApi
+import com.openminis.app.provider.ProviderBalanceClient
+import com.openminis.app.provider.ProviderBalanceState
 import com.openminis.app.provider.anthropic.AnthropicModelsApi
 import com.openminis.app.provider.gemini.GeminiModelsApi
 import com.openminis.app.provider.openai.OpenAIModelsApi
@@ -164,6 +166,10 @@ class ProviderRepository(private val context: Context) {
     // before load just has no model entry, exactly like a fresh install).
     private val _config = MutableStateFlow(ProviderConfig())
     val config: StateFlow<ProviderConfig> = _config.asStateFlow()
+
+    private val balanceLock = Any()
+    private val _balanceStates = MutableStateFlow<Map<String, ProviderBalanceState>>(emptyMap())
+    val balanceStates: StateFlow<Map<String, ProviderBalanceState>> = _balanceStates.asStateFlow()
 
     /**
      * [T-android-startup-config-stall] False until the persisted config has
@@ -2476,6 +2482,62 @@ class ProviderRepository(private val context: Context) {
         }
     }
 
+    /** Refresh one configured balance, retaining the last good value on errors. */
+    suspend fun refreshBalance(instanceId: String, force: Boolean = false) {
+        awaitConfigLoaded()
+        val instance = _config.value.instances.firstOrNull { it.id == instanceId } ?: return
+        if (!instance.balanceEnabled || instance.balanceApiPath.isNullOrBlank() ||
+            instance.balanceJsonPath.isNullOrBlank()
+        ) {
+            synchronized(balanceLock) {
+                _balanceStates.value = _balanceStates.value - instanceId
+            }
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        val shouldFetch = synchronized(balanceLock) {
+            val current = _balanceStates.value[instanceId]
+            if (current?.isLoading == true ||
+                (!force && current?.value != null && now - current.updatedAt < 60_000L)
+            ) {
+                false
+            } else {
+                _balanceStates.value = _balanceStates.value + (
+                    instanceId to (current ?: ProviderBalanceState()).copy(isLoading = true, error = null)
+                )
+                true
+            }
+        }
+        if (!shouldFetch) return
+
+        val result = runCatching {
+            ProviderBalanceClient.fetch(instance, usableApiKey(instance))
+        }
+        synchronized(balanceLock) {
+            val previous = _balanceStates.value[instanceId] ?: ProviderBalanceState()
+            _balanceStates.value = _balanceStates.value + (
+                instanceId to result.fold(
+                    onSuccess = { ProviderBalanceState(value = it, updatedAt = System.currentTimeMillis()) },
+                    onFailure = {
+                        previous.copy(
+                            isLoading = false,
+                            error = it.message ?: it.javaClass.simpleName,
+                        )
+                    },
+                )
+            )
+        }
+    }
+
+    /** Refresh all enabled balance endpoints concurrently when the picker opens. */
+    suspend fun refreshConfiguredBalances(force: Boolean = false) = kotlinx.coroutines.coroutineScope {
+        awaitConfigLoaded()
+        _config.value.instances
+            .filter { it.balanceEnabled }
+            .forEach { instance -> launch { refreshBalance(instance.id, force) } }
+    }
+
     // API Key management
     fun saveApiKey(instanceId: String, key: String) {
         encryptedPrefs.edit().putString("apikey_$instanceId", key).apply()
@@ -2651,6 +2713,9 @@ class ProviderRepository(private val context: Context) {
             // when set; old/new readers without the key decode to null →
             // default UA. Field name matches iOS for cross-platform interop.
             instance.customUserAgent?.takeIf { it.isNotBlank() }?.let { put("customUserAgent", it) }
+            if (instance.balanceEnabled) put("balanceEnabled", true)
+            instance.balanceApiPath?.takeIf { it.isNotBlank() }?.let { put("balanceApiPath", it) }
+            instance.balanceJsonPath?.takeIf { it.isNotBlank() }?.let { put("balanceJsonPath", it) }
         }
         return obj.toString(2)
     }
@@ -2917,6 +2982,9 @@ class ProviderRepository(private val context: Context) {
         // [T-provider-custom-user-agent] Additive: old exports lack the key →
         // empty → null → default UA. Field name matches iOS.
         val customUserAgent = dict.optString("customUserAgent", "").ifEmpty { null }
+        val balanceEnabled = dict.optBoolean("balanceEnabled", false)
+        val balanceApiPath = dict.optString("balanceApiPath", "").ifEmpty { null }
+        val balanceJsonPath = dict.optString("balanceJsonPath", "").ifEmpty { null }
 
         val instance = ProviderInstance(
             id = java.util.UUID.randomUUID().toString(),
@@ -2927,6 +2995,9 @@ class ProviderRepository(private val context: Context) {
             appendV1Suffix = appendV1,
             useResponsesAPI = useResponsesAPI,
             customUserAgent = customUserAgent,
+            balanceEnabled = balanceEnabled,
+            balanceApiPath = balanceApiPath,
+            balanceJsonPath = balanceJsonPath,
         )
         addInstance(instance)
 
