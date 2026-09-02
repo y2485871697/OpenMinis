@@ -628,6 +628,9 @@
     <string name="appearance_auto_focus_after_reply_title">回复后自动聚焦输入框</string>
     <string name="appearance_auto_focus_after_reply_footer">开启后，模型回复结束会自动弹出键盘，方便你立即追加输入。默认开启；如果你更希望先读完回复，可以关掉避免键盘意外弹出。</string>
     <string name="appearance_section_deep_thinking">深度思考</string>
+    <string name="appearance_section_streaming_haptics">振动反馈</string>
+    <string name="appearance_streaming_haptics_title">流式输出时振动</string>
+    <string name="appearance_streaming_haptics_footer">开启后，模型实时输出内容时会产生短促振动。关闭后流式输出保持静默。</string>
     <string name="appearance_auto_expand_thinking_title">流式输出时展开思考</string>
     <string name="appearance_auto_expand_thinking_footer">开启后，模型思考时新的思考块会自动展开，思考结束后自动折叠。关闭后，思考块保持折叠状态——点击即可查看。</string>
     <string name="appearance_section_font_size">字体大小</string>
