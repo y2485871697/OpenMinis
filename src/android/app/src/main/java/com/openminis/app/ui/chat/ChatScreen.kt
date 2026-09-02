@@ -3978,10 +3978,8 @@ fun ChatScreen(
                             sessionId,
                             item::class.java.simpleName,
                         )
-                        // 0.4f matches iOS .opacity(0.5) closely once Compose's
-                        // sRGB compositing is factored in. Renders below normal
-                        // intensity but the message stays selectable + readable.
-                        val rowAlpha = if (item.isCompacted()) 0.4f else 1f
+                        // Compacted history remains fully legible; the divider already marks the boundary.
+                        val rowAlpha = 1f
                         // [T-HANG-DIAG] log on first composition of any item
                         // whose content is large enough to be a likely hang
                         // suspect. SideEffect runs after the first successful
