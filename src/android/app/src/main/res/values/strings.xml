@@ -1938,4 +1938,9 @@
     <!-- [T-android-compact-progress] Live status while a compaction runs. -->
     <string name="compact_progress">Compacting… %1$d s elapsed</string>
     <string name="compact_progress_split">Compacting… %1$d s · summarizing in segments (%2$d/%3$d)</string>
+    <string name="context_compression_section_title">Context Compression Models</string>
+    <string name="context_compression_section_footer">Minis tries these models and groups in order when compacting long conversations. If none are configured or usable, it automatically falls back to the current chat model.</string>
+    <string name="context_compression_empty_hint">No models or groups added</string>
+    <string name="context_compression_add_models_title">Add Context Compression Models</string>
+    <string name="context_compression_add_groups_title">Add Context Compression Groups</string>
 </resources>
