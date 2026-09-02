@@ -96,6 +96,8 @@ fun ModelGroupsScreen(
     onAddAgentLoopModels: () -> Unit = {},
     /** T185: navigate to the groups picker for the agent-loop set. */
     onAddAgentLoopGroups: () -> Unit = {},
+    onAddContextCompressionModels: () -> Unit = {},
+    onAddContextCompressionGroups: () -> Unit = {},
 ) {
     val config by providerRepository.config.collectAsState()
     val groups = config.modelGroups
@@ -356,6 +358,12 @@ fun ModelGroupsScreen(
                 reorderState = reorderState,
                 onAddModelsTap = onAddAgentLoopModels,
                 onAddGroupsTap = onAddAgentLoopGroups,
+            )
+            contextCompressionModelsSectionItems(
+                providerRepository = providerRepository,
+                config = config,
+                onAddModelsTap = onAddContextCompressionModels,
+                onAddGroupsTap = onAddContextCompressionGroups,
             )
         }
     }
@@ -706,6 +714,95 @@ private fun LazyListScope.agentLoopModelsSectionItems(
     item("bottom_gap") { Spacer(modifier = Modifier.height(SectionDesign.SectionTopGap)) }
 }
 
+/** Models used only by the runtime context-compaction engine. */
+private fun LazyListScope.contextCompressionModelsSectionItems(
+    providerRepository: ProviderRepository,
+    config: com.openminis.app.data.model.ProviderConfig,
+    onAddModelsTap: () -> Unit,
+    onAddGroupsTap: () -> Unit,
+) {
+    val groups = config.contextCompressionGroupIds
+        .mapNotNull { id -> config.modelGroups.find { it.id == id } }
+        .distinctBy { it.id }
+    val entries = config.contextCompressionModelEntryIds
+        .mapNotNull { id -> config.modelEntries.find { it.id == id } }
+        .distinctBy { it.id }
+    val rows = buildList {
+        groups.forEach { group ->
+            val count = group.memberEntryIds.count { id -> config.modelEntries.any { it.id == id } }
+            add(Triple(group.name, "$count models", group.id))
+        }
+        entries.forEach { entry ->
+            val label = config.instances.find { it.id == entry.providerInstanceId }?.label.orEmpty()
+            add(Triple(entry.model.displayName, label, entry.id))
+        }
+    }
+
+    item("context_compression_section_spacer") {
+        Spacer(modifier = Modifier.height(SectionDesign.SectionTopGap))
+    }
+    item("context_compression_section_header") {
+        SectionHeader(text = stringResource(R.string.context_compression_section_title))
+    }
+    item("context_compression_section_card") {
+        SectionCard {
+            if (rows.isEmpty()) {
+                Text(
+                    text = stringResource(R.string.context_compression_empty_hint),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+                )
+            } else {
+                rows.forEachIndexed { index, row ->
+                    if (index > 0) SectionDivider()
+                    val isGroup = groups.any { it.id == row.third }
+                    AgentLoopRow(
+                        title = row.first,
+                        subtitle = row.second,
+                        badge = if (isGroup) stringResource(R.string.agent_loop_section_group_badge) else null,
+                        onRemove = {
+                            if (isGroup) providerRepository.removeContextCompressionGroup(row.third)
+                            else providerRepository.removeContextCompressionEntry(row.third)
+                        },
+                        showDragHandle = false,
+                    )
+                }
+            }
+        }
+    }
+    item("context_compression_add_buttons") {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            MinisOutlinedButton(
+                onClick = onAddModelsTap,
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(50),
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(stringResource(R.string.agent_loop_section_add_models))
+            }
+            MinisOutlinedButton(
+                onClick = onAddGroupsTap,
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(50),
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(stringResource(R.string.agent_loop_section_add_groups))
+            }
+        }
+    }
+    item("context_compression_footer") {
+        SectionFooter(text = stringResource(R.string.context_compression_section_footer))
+    }
+    item("bottom_gap_context_compression") {
+        Spacer(modifier = Modifier.height(SectionDesign.SectionTopGap))
+    }
+}
 /** Single row inside the agent-loop section. Drag handle on the left
  *  (T186), title + optional subtitle + optional "Group" badge in the
  *  middle, × to unpin on the right. The drag-handle modifier is built
@@ -719,6 +816,7 @@ private fun AgentLoopRow(
     badge: String?,
     onRemove: () -> Unit,
     dragHandleModifier: Modifier = Modifier,
+    showDragHandle: Boolean = true,
 ) {
     Row(
         modifier = Modifier
@@ -731,16 +829,20 @@ private fun AgentLoopRow(
         // draggableHandle() never sees ACTION_DOWN/MOVE on a bare Icon.
         // IconButton is Compose's clickable container and consumes pointer
         // events, letting the dragHandleModifier route gestures correctly.
-        IconButton(
-            onClick = {},
-            modifier = dragHandleModifier.size(36.dp),
-        ) {
-            Icon(
-                imageVector = Icons.Default.DragHandle,
-                contentDescription = stringResource(R.string.model_group_detail_drag_to_reorder),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                modifier = Modifier.size(20.dp),
-            )
+        if (showDragHandle) {
+            IconButton(
+                onClick = {},
+                modifier = dragHandleModifier.size(36.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.DragHandle,
+                    contentDescription = stringResource(R.string.model_group_detail_drag_to_reorder),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        } else {
+            Spacer(modifier = Modifier.width(8.dp))
         }
         Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
