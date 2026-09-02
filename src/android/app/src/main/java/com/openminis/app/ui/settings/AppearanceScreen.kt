@@ -46,6 +46,7 @@ import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material.icons.outlined.ScreenLockPortrait
 import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.Vibration
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -100,6 +101,7 @@ const val KEY_SHOW_CHAT_TITLE = "appearance.show_chat_title"  // Boolean, defaul
 // `@AppStorage("chat.autoExpandThinking")` so future config sync reads the same
 // value. Read at block-mount time in ThinkingBlock.
 const val KEY_AUTO_EXPAND_THINKING = "chat.autoExpandThinking"  // Boolean, default true
+const val KEY_STREAMING_HAPTICS = "chat.streamingHaptics"  // Boolean, default true
 // [T-android-auto-grouping] When a chat's title is first generated, also file
 // it into a matching EXISTING group. Rides the title-generation call — no
 // second round-trip. Key name matches iOS `autoGroupingEnabled` so a future
@@ -143,6 +145,10 @@ fun showChatTitleEnabled(context: Context): Boolean =
  *  user taps it. */
 fun autoExpandThinkingEnabled(context: Context): Boolean =
     getAppearancePrefs(context).getBoolean(KEY_AUTO_EXPAND_THINKING, true)
+
+/** Default ON; checked for every coalesced streaming tick. */
+fun streamingHapticsEnabled(context: Context): Boolean =
+    getAppearancePrefs(context).getBoolean(KEY_STREAMING_HAPTICS, true)
 
 /** Font scale levels matching iOS: XS(-2) Small(-1) Default(0) Medium(1) Large(2) XL(3) */
 /**
@@ -261,6 +267,7 @@ fun AppearanceScreen(
     var toolPreview by remember { mutableStateOf(prefs.getBoolean(KEY_TOOL_PREVIEW, true)) }
     var autoFocusAfterReply by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_FOCUS_AFTER_REPLY, true)) }
     var autoExpandThinking by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_EXPAND_THINKING, true)) }
+    var streamingHaptics by remember { mutableStateOf(prefs.getBoolean(KEY_STREAMING_HAPTICS, true)) }
     var showChatTitle by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_CHAT_TITLE, true)) }
     var autoGrouping by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_GROUPING, true)) }
     var chatInputLevel by remember { mutableIntStateOf(prefs.getInt(KEY_FONT_CHAT_INPUT, 0)) }
@@ -448,6 +455,24 @@ fun AppearanceScreen(
                 onCheckedChange = {
                     autoExpandThinking = it
                     prefs.edit().putBoolean(KEY_AUTO_EXPAND_THINKING, it).apply()
+                },
+                showDivider = false,
+            )
+        }
+
+        // -- Streaming haptics --
+        SettingsSection(
+            header = stringResource(R.string.appearance_section_streaming_haptics),
+            footer = stringResource(R.string.appearance_streaming_haptics_footer),
+        ) {
+            SettingsSwitchRow(
+                icon = Icons.Outlined.Vibration,
+                iconColor = tileOrange,
+                title = stringResource(R.string.appearance_streaming_haptics_title),
+                checked = streamingHaptics,
+                onCheckedChange = {
+                    streamingHaptics = it
+                    prefs.edit().putBoolean(KEY_STREAMING_HAPTICS, it).apply()
                 },
                 showDivider = false,
             )
