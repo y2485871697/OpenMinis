@@ -495,7 +495,7 @@ fun ModelGroupDetailScreen(
                     }
                     val contextEnabled = contextLimitTokens != null
                     // T-android-ctx-slider-cap (port iOS fa77f493): the slider
-                    // is now a fixed 7-stop ladder decoupled from member-model
+                    // is now a fixed 8-stop ladder decoupled from member-model
                     // metadata. We no longer derive an `unlimitedTokens` cap
                     // from `max(member.contextWindow)`, because that field is
                     // unreliable (image-output / router models report no
