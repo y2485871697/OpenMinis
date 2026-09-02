@@ -1770,4 +1770,13 @@
     <string name="context_compression_empty_hint">尚未添加模型或分组</string>
     <string name="context_compression_add_models_title">添加上下文压缩模型</string>
     <string name="context_compression_add_groups_title">添加上下文压缩分组</string>
-</resources>
+    <string name="provider_balance_section">账户余额</string>
+    <string name="provider_balance_enabled">获取账户余额</string>
+    <string name="provider_balance_api_path">余额 API 路径</string>
+    <string name="provider_balance_json_path">结果 JSON 键</string>
+    <string name="provider_balance_footer">发送带认证信息的 GET 请求。JSON 键支持点号和数组下标，例如 balance_infos[0].total_balance。</string>
+    <string name="provider_balance_refresh">刷新余额</string>
+    <string name="provider_balance_loading">正在获取余额…</string>
+    <string name="provider_balance_not_loaded">尚未获取余额</string>
+    <string name="provider_balance_error">无法获取：%1$s</string>
+    <string name="provider_balance_content_description">账户余额</string></resources>
