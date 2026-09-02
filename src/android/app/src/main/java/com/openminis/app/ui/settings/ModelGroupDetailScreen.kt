@@ -637,7 +637,7 @@ fun ModelGroupDetailScreen(
  * (ModelGroupDetailView.swift, fa77f493). Step labels:
  * 32K / 64K / 128K / 200K / 400K / 1M / Unlimited.
  *
- * Fixed 7-stop ladder, always shown verbatim regardless of which models (if
+ * Fixed 8-stop ladder, always shown verbatim regardless of which models (if
  * any) are in the group. The previous behaviour clipped the ladder to the
  * largest member-declared context window, but model metadata is unreliable
  * (e.g. image-output / router models report no window and fall through to
@@ -658,6 +658,7 @@ private val CONTEXT_LIMIT_PRESETS = listOf(
     64_000,
     128_000,
     200_000,
+    272_000,
     400_000,
     1_000_000,
 )
