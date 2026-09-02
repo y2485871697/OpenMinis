@@ -29,6 +29,12 @@ jobs:
           java-version: '17'
           cache: gradle
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache-dependency-path: deps/rclone-mobile/go.sum
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
@@ -38,8 +44,14 @@ jobs:
       - name: Prepare build customization
         run: cp src/android/app/provider-customization.properties.example src/android/app/provider-customization.properties
 
-      - name: Build PRoot and sandbox assets
+      - name: Build native dependencies and sandbox assets
         run: |
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+          ./deps/build_rclone_android.sh
+          mkdir -p src/android/app/libs
+          cp deps/build/rclone/rclone.aar src/android/app/libs/rclone.aar
           ./deps/build_proot.sh
           ./scripts/prepare_android_sandbox.sh
 
