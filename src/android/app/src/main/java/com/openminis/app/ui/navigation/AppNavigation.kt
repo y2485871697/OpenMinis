@@ -101,6 +101,8 @@ object Routes {
     const val ADD_MODELS_TO_AGENT_LOOP = "add_models_to_agent_loop"
     /** T185: picker that adds model *groups* to the agent-loop set. */
     const val ADD_GROUPS_TO_AGENT_LOOP = "add_groups_to_agent_loop"
+    const val ADD_MODELS_TO_CONTEXT_COMPRESSION = "add_models_to_context_compression"
+    const val ADD_GROUPS_TO_CONTEXT_COMPRESSION = "add_groups_to_context_compression"
     /** T171→T182: AGENT_LOOP_MODELS deprecated (the screen lived inside
      *  Settings, now the picker is a section inside ModelGroupsScreen).
      *  Route declared so any back-compat deep-link string from preview
@@ -904,6 +906,12 @@ fun AppNavigation(
                 onAddAgentLoopGroups = {
                     navController.safeNavigate(Routes.ADD_GROUPS_TO_AGENT_LOOP)
                 },
+                onAddContextCompressionModels = {
+                    navController.safeNavigate(Routes.ADD_MODELS_TO_CONTEXT_COMPRESSION)
+                },
+                onAddContextCompressionGroups = {
+                    navController.safeNavigate(Routes.ADD_GROUPS_TO_CONTEXT_COMPRESSION)
+                },
             )
         }
 
@@ -952,6 +960,21 @@ fun AppNavigation(
             AddAgentLoopGroupsScreen(
                 providerRepository = providerRepository,
                 onBack = { navController.safePopBackStack() },
+            )
+        }
+        composable(Routes.ADD_MODELS_TO_CONTEXT_COMPRESSION) {
+            AddAgentLoopModelsScreen(
+                providerRepository = providerRepository,
+                onBack = { navController.safePopBackStack() },
+                contextCompression = true,
+            )
+        }
+
+        composable(Routes.ADD_GROUPS_TO_CONTEXT_COMPRESSION) {
+            AddAgentLoopGroupsScreen(
+                providerRepository = providerRepository,
+                onBack = { navController.safePopBackStack() },
+                contextCompression = true,
             )
         }
 
