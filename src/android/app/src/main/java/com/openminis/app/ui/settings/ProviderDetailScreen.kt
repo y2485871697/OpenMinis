@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MovieCreation
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.outlined.Savings
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Visibility
@@ -46,6 +47,7 @@ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -90,6 +92,7 @@ fun ProviderDetailScreen(
     onVoiceServiceClick: (String) -> Unit = {},
 ) {
     val config by providerRepository.config.collectAsState()
+    val balanceStates by providerRepository.balanceStates.collectAsState()
     val instance = config.instances.find { it.id == instanceId }
     var showDeleteDialog by remember { mutableStateOf(false) }
     // T143: long-press → confirm delete on a single model entry. Built-in
@@ -130,11 +133,18 @@ fun ProviderDetailScreen(
     // [T-provider-custom-user-agent] Per-provider UA override input. Only the
     // OpenAI-/Anthropic-compat custom-base section surfaces it (see gate below).
     var customUserAgent by remember { mutableStateOf(instance.customUserAgent ?: "") }
+    var balanceEnabled by remember(instanceId) { mutableStateOf(instance.balanceEnabled) }
+    var balanceApiPath by remember(instanceId) { mutableStateOf(instance.balanceApiPath ?: "") }
+    var balanceJsonPath by remember(instanceId) { mutableStateOf(instance.balanceJsonPath ?: "") }
 
     val entries = providerRepository.entriesFor(instanceId)
     var isRefreshing by remember { mutableStateOf(false) }
 
     val exportContext = androidx.compose.ui.platform.LocalContext.current
+
+    LaunchedEffect(instance.id, instance.balanceEnabled, instance.balanceApiPath, instance.balanceJsonPath) {
+        if (instance.balanceEnabled) providerRepository.refreshBalance(instance.id)
+    }
 
     SettingsScaffold(
         title = instance.label,
@@ -492,6 +502,124 @@ fun ProviderDetailScreen(
                 },
                 showDivider = false,
             )
+        }
+
+        // ─── Account Balance ─────────────────────────────────────────
+        SettingsSection(
+            header = stringResource(R.string.provider_balance_section),
+            footer = stringResource(R.string.provider_balance_footer),
+        ) {
+            SettingsSwitchRow(
+                title = stringResource(R.string.provider_balance_enabled),
+                checked = balanceEnabled,
+                onCheckedChange = { enabled ->
+                    balanceEnabled = enabled
+                    providerRepository.updateInstance(
+                        instance.copy(
+                            balanceEnabled = enabled,
+                            balanceApiPath = balanceApiPath.ifBlank { null },
+                            balanceJsonPath = balanceJsonPath.ifBlank { null },
+                        )
+                    )
+                    if (enabled) scope.launch { providerRepository.refreshBalance(instance.id, force = true) }
+                },
+                showDivider = false,
+            )
+            if (balanceEnabled) {
+                SettingsCardBlock {
+                    Text(
+                        stringResource(R.string.provider_balance_api_path),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    SectionTextField(
+                        value = balanceApiPath,
+                        onValueChange = { balanceApiPath = it },
+                        placeholder = "/user/balance",
+                        singleLine = true,
+                        fieldModifier = Modifier.bringIntoViewOnFocus(),
+                    )
+                    HorizontalDivider(
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                    )
+                    Text(
+                        stringResource(R.string.provider_balance_json_path),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    SectionTextField(
+                        value = balanceJsonPath,
+                        onValueChange = { balanceJsonPath = it },
+                        placeholder = "balance_infos[0].total_balance",
+                        singleLine = true,
+                        fieldModifier = Modifier.bringIntoViewOnFocus(),
+                    )
+                    HorizontalDivider(
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                    )
+                    val balanceState = balanceStates[instance.id]
+                    Row(
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Outlined.Savings,
+                            contentDescription = stringResource(R.string.provider_balance_content_description),
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = when {
+                                balanceState?.isLoading == true -> stringResource(R.string.provider_balance_loading)
+                                balanceState?.value != null -> balanceState.value
+                                balanceState?.error != null -> stringResource(
+                                    R.string.provider_balance_error,
+                                    balanceState.error,
+                                )
+                                else -> stringResource(R.string.provider_balance_not_loaded)
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (balanceState?.error != null) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 2,
+                        )
+                        MinisSmallTextButton(
+                            onClick = {
+                                providerRepository.updateInstance(
+                                    instance.copy(
+                                        balanceEnabled = true,
+                                        balanceApiPath = balanceApiPath.ifBlank { null },
+                                        balanceJsonPath = balanceJsonPath.ifBlank { null },
+                                    )
+                                )
+                                scope.launch { providerRepository.refreshBalance(instance.id, force = true) }
+                            },
+                        ) {
+                            Text(stringResource(R.string.common_save))
+                        }
+                        IconButton(
+                            onClick = {
+                                providerRepository.updateInstance(
+                                    instance.copy(
+                                        balanceEnabled = true,
+                                        balanceApiPath = balanceApiPath.ifBlank { null },
+                                        balanceJsonPath = balanceJsonPath.ifBlank { null },
+                                    )
+                                )
+                                scope.launch { providerRepository.refreshBalance(instance.id, force = true) }
+                            },
+                        ) {
+                            Icon(
+                                Icons.Default.Refresh,
+                                contentDescription = stringResource(R.string.provider_balance_refresh),
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         // ─── Voice Service (dual visibility) ────────────────────────
