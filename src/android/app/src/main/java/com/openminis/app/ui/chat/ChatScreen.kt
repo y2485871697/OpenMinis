@@ -630,14 +630,16 @@ fun ChatScreen(
             .filter { it > 0 }
             .sample(50L)
             .collectLatest {
-                if (streamingHapticsEnabled(context) && streamingVibrator.hasVibrator()) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        streamingVibrator.vibrate(
-                            VibrationEffect.createOneShot(10L, 96),
-                        )
-                    } else {
-                        @Suppress("DEPRECATION")
-                        streamingVibrator.vibrate(10L)
+                if (streamingHapticsEnabled(context)) {
+                    streamingVibrator?.takeIf { it.hasVibrator() }?.let { vibrator ->
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            vibrator.vibrate(
+                                VibrationEffect.createOneShot(10L, 96),
+                            )
+                        } else {
+                            @Suppress("DEPRECATION")
+                            vibrator.vibrate(10L)
+                        }
                     }
                 }
             }
