@@ -21,6 +21,7 @@ import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -441,9 +442,14 @@ internal fun BoundsTrackedBlock(
 ) {
     val registry = LocalMessageBoundsRegistry.current
     Box(
-        modifier = Modifier.onGloballyPositioned { coords ->
-            registry?.put(messageId, slotKey, coords.boundsInWindow(), markdown)
-        },
+        modifier = Modifier
+            // RikkaHub keeps the message row stable and lets Compose animate
+            // only its changing height; this avoids whole-list jumps while a
+            // provider emits successive text parts.
+            .animateContentSize()
+            .onGloballyPositioned { coords ->
+                registry?.put(messageId, slotKey, coords.boundsInWindow(), markdown)
+            },
     ) {
         content()
     }
