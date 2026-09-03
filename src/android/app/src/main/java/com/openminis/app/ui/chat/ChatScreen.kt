@@ -4139,7 +4139,7 @@ fun ChatScreen(
                                 ) {
                                     LargeContentGuard(
                                         content = liveBlock.content,
-                                        isStreaming = item.isStreaming && liveDelta != null,
+                                        isStreaming = liveDelta != null,
                                         stableKey = "text:${item.messageId}:${item.block.id}",
                                     ) {
                                         SideEffect {
@@ -4147,7 +4147,7 @@ fun ChatScreen(
                                         }
                                         StreamingMarkdownText(
                                             content = liveBlock.content,
-                                            isStreaming = item.isStreaming && liveDelta != null,
+                                            isStreaming = liveDelta != null,
                                             shardId = TextShardId(
                                                 messageId = item.messageId,
                                                 shardId = "text:${item.block.id}",
