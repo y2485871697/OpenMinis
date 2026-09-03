@@ -114,8 +114,12 @@ class ReadAloudPlayer(context: Context) {
     val currentChunkIndex: StateFlow<Int> = _currentChunkIndex.asStateFlow()
     private val _totalChunks = MutableStateFlow(0)
     val totalChunks: StateFlow<Int> = _totalChunks.asStateFlow()
+    private val _playbackProgress = MutableStateFlow(0f)
+    /** Overall reply progress, always finite and clamped to 0..1 for Compose. */
+    val playbackProgress: StateFlow<Float> = _playbackProgress.asStateFlow()
     @Volatile private var currentUtterance: String? = null
     @Volatile private var resumeSystemUtterance: String? = null
+    private var progressJob: Job? = null
 
     /**
      * Rolling buffer for streaming input. Mirrors [TextToSpeechManager]'s own
@@ -157,8 +161,10 @@ class ReadAloudPlayer(context: Context) {
                 currentUtterance = text
                 _currentChunkIndex.value = (_currentChunkIndex.value + 1)
                     .coerceAtMost(_totalChunks.value.coerceAtLeast(1))
+                updateCurrentChunkProgress(0f)
                 runCatching { speakOne(text) }
                     .onFailure { AppLogger.error(TAG, "utterance failed: $it") }
+                updateCurrentChunkProgress(1f)
                 currentUtterance = null
                 // Queue drained → speech is over. Counter rather than
                 // Channel.isEmpty, which is experimental API.
@@ -203,6 +209,7 @@ class ReadAloudPlayer(context: Context) {
         stop()
         _currentChunkIndex.value = 0
         _totalChunks.value = 0
+        _playbackProgress.value = 0f
         enqueue(text)
     }
 
@@ -280,6 +287,8 @@ class ReadAloudPlayer(context: Context) {
         heldForCapture.addAll(held)
 
         playbackFinisher?.invoke()
+        progressJob?.cancel()
+        progressJob = null
         releasePlayer()
         system.stop()
         pending.set(0)
@@ -324,6 +333,7 @@ class ReadAloudPlayer(context: Context) {
         resumeSystemUtterance = null
         _currentChunkIndex.value = 0
         _totalChunks.value = 0
+        _playbackProgress.value = 0f
         _isSpeaking.value = false
         if (ownsCapsule()) {
             VoiceOutputState.isSpeaking.value = false
@@ -524,6 +534,8 @@ class ReadAloudPlayer(context: Context) {
                 if (resumed) return
                 resumed = true
                 playbackFinisher = null
+                progressJob?.cancel()
+                progressJob = null
                 releasePlayer()
                 if (cont.isActive) cont.resume(Unit)
             }
@@ -555,6 +567,20 @@ class ReadAloudPlayer(context: Context) {
                 // Now a ROM that rejects the speed change still plays at 1×;
                 // only the speed is lost, never the audio.
                 mp.start()
+                progressJob?.cancel()
+                progressJob = scope.launch {
+                    while (player === mp) {
+                        val duration = runCatching { mp.duration }.getOrDefault(0)
+                        val position = runCatching { mp.currentPosition }.getOrDefault(0)
+                        val fraction = if (duration > 0) {
+                            position.toFloat() / duration.toFloat()
+                        } else {
+                            0f
+                        }
+                        updateCurrentChunkProgress(fraction)
+                        delay(POLL_MS)
+                    }
+                }
                 val speed = VoiceOutputState.speed.value
                 if (speed != 1.0f) {
                     runCatching {
@@ -645,11 +671,20 @@ class ReadAloudPlayer(context: Context) {
         // completion — crucially without stop(), which is what used to cut
         // words in half.
         if (progressListenerBroken) {
-            kotlinx.coroutines.delay(estimatedSpeechMs(text))
+            val estimate = estimatedSpeechMs(text)
+            val started = System.currentTimeMillis()
+            while (System.currentTimeMillis() - started < estimate) {
+                updateCurrentChunkProgress(
+                    (System.currentTimeMillis() - started).toFloat() / estimate.toFloat(),
+                )
+                kotlinx.coroutines.delay(POLL_MS)
+            }
             return true
         }
         val budgetMs = (text.length * 600L + 10_000L).coerceAtMost(180_000L)
         val deadline = System.currentTimeMillis() + budgetMs
+        val estimatedMs = estimatedSpeechMs(text)
+        val started = System.currentTimeMillis()
         var timedOut = false
         while (system.isSpeaking.value) {
             if (System.currentTimeMillis() > deadline) {
@@ -661,6 +696,10 @@ class ReadAloudPlayer(context: Context) {
                 timedOut = true
                 break
             }
+            updateCurrentChunkProgress(
+                ((System.currentTimeMillis() - started).toFloat() / estimatedMs.toFloat())
+                    .coerceAtMost(0.98f),
+            )
             kotlinx.coroutines.delay(POLL_MS)
         }
         if (timedOut) {
@@ -686,7 +725,20 @@ class ReadAloudPlayer(context: Context) {
     private fun estimatedSpeechMs(text: String): Long =
         (text.length * 90L + 400L).coerceIn(600L, 30_000L)
 
+    private fun updateCurrentChunkProgress(chunkFraction: Float) {
+        val total = _totalChunks.value
+        if (total <= 0) {
+            _playbackProgress.value = 0f
+            return
+        }
+        val completed = (_currentChunkIndex.value - 1).coerceAtLeast(0)
+        val safeFraction = if (chunkFraction.isFinite()) chunkFraction.coerceIn(0f, 1f) else 0f
+        _playbackProgress.value = ((completed + safeFraction) / total.toFloat()).coerceIn(0f, 1f)
+    }
+
     private fun releasePlayer() {
+        progressJob?.cancel()
+        progressJob = null
         player?.runCatching {
             if (isPlaying) stop()
             release()

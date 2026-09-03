@@ -695,6 +695,25 @@ fun ChatScreen(
     // pop back) doesn't wipe what the user has typed. Mirrors iOS
     // `AIChatView` which binds the composer against `vm.inputText`.
     val inputText by viewModel.inputText.collectAsState()
+    var systemDictationPrefix by remember { mutableStateOf("") }
+    val systemDictationLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode != android.app.Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        val recognized = result.data
+            ?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            ?.trim()
+            .orEmpty()
+        if (recognized.isNotEmpty()) {
+            val separator = if (
+                systemDictationPrefix.isBlank() || systemDictationPrefix.endsWith(' ')
+            ) "" else " "
+            val draft = systemDictationPrefix + separator + recognized
+            viewModel.setInputText(draft)
+            viewModel.updateSlashMenuState(draft)
+        }
+    }
 
     // ─── T51: Share Injection + Move-to capsule ───────────────────────
     // Drain any pending share buffered by ShareCoordinator (cold start =
@@ -2923,6 +2942,12 @@ fun ChatScreen(
                         MinisMenu(
                             expanded = showChatMenu,
                             onDismissRequest = { showChatMenu = false },
+                            // Keep the expanded tools menu clear of the composer
+                            // and status bar. All entries remain reachable via
+                            // the menu's built-in vertical scrolling.
+                            modifier = Modifier.heightIn(
+                                max = (configuration.screenHeightDp * 0.58f).dp,
+                            ),
                         ) {
                             // [T-android-memory-enabled-minisconfig] Gate the
                             // "Memories in Session" item below on the session's
@@ -3427,9 +3452,9 @@ fun ChatScreen(
                     // seedKeys. Frozen rows are the same instances every tick,
                     // so LazyColumn's key+equals skip path sees ZERO change.
                     //
-                    // Keep the visible stream close to the provider's chunk
-                    // cadence. 24 ms is smooth enough to feel continuous while
-                    // conflate() still prevents a slow frame from queueing work.
+                    // The ViewModel emits paced, character-limited frames. Sample
+                    // at display cadence so two frames are not merged back into
+                    // one visibly larger text jump here.
                     var frozenRows: List<FlatChatItem> = emptyList()
                     var frozenKeys: Set<String> = emptySet()
                     var frozenSplitIdx = -1
@@ -3448,7 +3473,7 @@ fun ChatScreen(
                         viewModel.streamingById,
                     ) { msgs, stream -> msgs to stream }
                         .conflate()
-                        .sample(24L)
+                        .sample(16L)
                         .collect { (msgs, stream) ->
                             val tickStartNs = System.nanoTime()
                             if (stream.isNotEmpty() && !streamWasActive) {
@@ -6342,6 +6367,38 @@ fun ChatScreen(
                                 manager.clearDegradationAndRefresh()
                                 val prefix = viewModel.inputText.value
                                 val separator = if (prefix.isBlank() || prefix.endsWith(' ')) "" else " "
+                                // Some OEM ROMs expose a system dictation Activity
+                                // but no embeddable SpeechRecognizer service. Use
+                                // that Activity as the lightweight tap fallback;
+                                // long-press still opens Minis' full voice panel.
+                                if (!manager.isAvailable.value) {
+                                    systemDictationPrefix = prefix
+                                    val intent = Intent(
+                                        android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH,
+                                    ).apply {
+                                        putExtra(
+                                            android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                            android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+                                        )
+                                        putExtra(
+                                            android.speech.RecognizerIntent.EXTRA_LANGUAGE,
+                                            manager.locale.value.toLanguageTag(),
+                                        )
+                                        putExtra(
+                                            android.speech.RecognizerIntent.EXTRA_PROMPT,
+                                            context.getString(R.string.voice_panel_no_engine_title),
+                                        )
+                                    }
+                                    runCatching { systemDictationLauncher.launch(intent) }
+                                        .onFailure {
+                                            android.widget.Toast.makeText(
+                                                context,
+                                                context.getString(R.string.voice_panel_no_engine_body),
+                                                android.widget.Toast.LENGTH_LONG,
+                                            ).show()
+                                        }
+                                    return@launch
+                                }
                                 manager.startRecording(
                                     onPartialOrFinal = { recognized, _ ->
                                         if (recognized.isNotBlank()) {

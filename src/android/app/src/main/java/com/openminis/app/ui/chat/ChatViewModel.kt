@@ -677,6 +677,8 @@ class ChatViewModel(
         var pendingContent: String? = null
         var pendingBlocks: List<AssistantBlock> = emptyList()
         var pendingAwaiting: Boolean = false
+        /** Keep the render overlay until the final text has been paced out. */
+        var finishAfterDrain: Boolean = false
     }
     private val streamFlushStates = HashMap<String, StreamFlushState>()
 
@@ -701,18 +703,66 @@ class ChatViewModel(
         for (id in drop) streamFlushStates.remove(id)?.trailingJob?.cancel()
     }
 
-    // RikkaHub-style streaming cadence: short replies update close to the
-    // display frame rate instead of accumulating visibly large chunks. Very
-    // long replies retain progressively stronger pacing to protect markdown
-    // parsing and low-memory devices.
+    // Render cadence stays close to the display frame rate even for long
+    // replies. The old 100..1000 ms tiers visibly released whole lines at once.
     private fun streamFlushThrottleMs(len: Int): Long = when {
-        len < 500 -> 24L
-        len < 2_000 -> 32L
-        len < 32_000 -> 100L
-        len < 64_000 -> 250L
-        len < 128_000 -> 500L
-        else -> 1_000L
+        len < 32_000 -> 16L
+        len < 128_000 -> 24L
+        else -> 32L
     }
+
+    /**
+     * Reveal provider bursts as a steady typewriter stream. SSE servers are
+     * allowed to put a paragraph in one event; time throttling alone therefore
+     * cannot prevent a two-line jump. This drain caps every visible update to a
+     * handful of UTF-16 code units and keeps consuming the freshest target.
+     */
+    private fun startStreamReveal(id: String, state: StreamFlushState) {
+        if (state.trailingJob != null) return
+        state.trailingJob = viewModelScope.launch {
+            try {
+                while (streamFlushStates[id] === state) {
+                    val target = state.pendingContent ?: break
+                    val current = state.lastFlushedLen.coerceIn(0, target.length)
+                    var end = (current + streamRevealCharsPerTick).coerceAtMost(target.length)
+                    if (end < target.length && end > current &&
+                        Character.isHighSurrogate(target[end - 1])
+                    ) {
+                        end--
+                    }
+                    if (end <= current && current < target.length) end = current + 1
+                    val visible = target.substring(0, end)
+                    _streamingById.value = _streamingById.value + (
+                        id to StreamingDelta(
+                            content = visible,
+                            toolBlocks = state.pendingBlocks,
+                            isAwaitingModelResponse = state.pendingAwaiting,
+                        )
+                    )
+                    state.lastFlushMs = System.currentTimeMillis()
+                    state.lastFlushedLen = visible.length
+
+                    if (end >= target.length && state.pendingContent == target) {
+                        state.pendingContent = null
+                        break
+                    }
+                    kotlinx.coroutines.delay(streamFlushThrottleMs(target.length))
+                }
+            } finally {
+                state.trailingJob = null
+                if (streamFlushStates[id] === state) {
+                    if (state.pendingContent != null) {
+                        startStreamReveal(id, state)
+                    } else if (state.finishAfterDrain) {
+                        streamFlushStates.remove(id)
+                        _streamingById.value = _streamingById.value - id
+                    }
+                }
+            }
+        }
+    }
+
+    private val streamRevealCharsPerTick = 8
 
     /**
      * Composer draft. Owned by VM so it survives navigation (e.g. push EnvVars
@@ -9805,18 +9855,9 @@ class ChatViewModel(
         if (isStreaming) {
             val toolBlocksImmutable = toolBlocks.toList()
 
-            // [T-android-stream-flush-dualpath] Dual-path flush at the
-            // message-accumulation layer (NOT per-fragment, which never
-            // throttled). Decide whether to publish this delta now:
-            //   • structural change (toolBlocks count / awaiting flag) →
-            //     publish immediately — these drive tool-bubble UI and must
-            //     never be coalesced away or the bubble state stalls.
-            //   • else time-path: enough ms since last publish for this length.
-            //   • else newline fast-path: a line break in the newly-streamed
-            //     chunk + ≥50 new chars, gated to short docs (iOS parity).
-            // When none fire, stash the latest as a trailing publish so the
-            // final chunk before a pause still lands; a fresh delta cancels
-            // and replaces it.
+            // Provider events are target snapshots, not display frames. Keep
+            // only the newest target and let startStreamReveal expose it in
+            // small steps; otherwise one SSE event can paint two full lines.
             val st = streamFlushStates.getOrPut(id) {
                 StreamFlushState().also { it.lastFlushedLen = 0 }
             }
@@ -9834,55 +9875,21 @@ class ChatViewModel(
                 prev.toolBlocks.size != toolBlocksImmutable.size ||
                 prev.isAwaitingModelResponse != isAwaitingModelResponse ||
                 toolStatusChanged
-            val now = System.currentTimeMillis()
-            val elapsed = now - st.lastFlushMs
-            val throttle = streamFlushThrottleMs(content.length)
-            val newChunk = if (content.length > st.lastFlushedLen) {
-                content.substring(st.lastFlushedLen.coerceAtMost(content.length))
-            } else ""
-            val unflushed = content.length - st.lastFlushedLen
-            val newlineFlush = content.length < NEWLINE_FLUSH_MAX_LEN &&
-                newChunk.contains('\n') &&
-                unflushed >= NEWLINE_FLUSH_MIN_CHARS
-
-            fun publish(text: String, blocks: List<AssistantBlock>, awaiting: Boolean) {
+            st.pendingContent = content
+            st.pendingBlocks = toolBlocksImmutable
+            st.pendingAwaiting = isAwaitingModelResponse
+            if (structuralChange) {
+                val visible = prev?.content.orEmpty().take(content.length)
                 _streamingById.value = _streamingById.value + (
                     id to StreamingDelta(
-                        content = text,
-                        toolBlocks = blocks,
-                        isAwaitingModelResponse = awaiting,
+                        content = visible,
+                        toolBlocks = toolBlocksImmutable,
+                        isAwaitingModelResponse = isAwaitingModelResponse,
                     )
                 )
-                st.lastFlushMs = System.currentTimeMillis()
-                st.lastFlushedLen = text.length
+                st.lastFlushedLen = visible.length
             }
-
-            if (structuralChange || elapsed >= throttle || newlineFlush) {
-                st.trailingJob?.cancel()
-                st.trailingJob = null
-                st.pendingContent = null
-                publish(content, toolBlocksImmutable, isAwaitingModelResponse)
-            } else {
-                // Throttled: always record this delta as the freshest pending
-                // value, so whenever the trailing job fires it publishes the
-                // latest text — not whatever was captured when it was first
-                // scheduled (review #2). Schedule the job only once.
-                st.pendingContent = content
-                st.pendingBlocks = toolBlocksImmutable
-                st.pendingAwaiting = isAwaitingModelResponse
-                if (st.trailingJob == null) {
-                    val wait = (throttle - elapsed).coerceAtLeast(16L)
-                    st.trailingJob = viewModelScope.launch {
-                        kotlinx.coroutines.delay(wait)
-                        val pc = st.pendingContent
-                        if (pc != null) {
-                            publish(pc, st.pendingBlocks, st.pendingAwaiting)
-                            st.pendingContent = null
-                        }
-                        st.trailingJob = null
-                    }
-                }
-            }
+            startStreamReveal(id, st)
             // [T-android-timeout-while-running] If a transient banner
             // (`message.error`) is still on the canonical assistant message
             // when a fresh streaming event arrives, the banner is stale —
@@ -9914,19 +9921,17 @@ class ChatViewModel(
             }
             return
         }
-        // [T-android-stream-flush-dualpath] Stream end → cancel any pending
-        // trailing flush and drop the throttle accumulator for this message;
-        // the canonical drain below publishes the final, complete text.
-        clearStreamFlushState(id)
-        // Stream end → sync delta into canonical message + clear side-channel.
+        // Stream end syncs the complete canonical message immediately for
+        // persistence/history, while the side-channel finishes its paced
+        // reveal. Removing the overlay early caused the final paragraph to
+        // jump onto screen in one frame.
         val current = _messages.value
         val idx = current.indexOfLast { it.id == id }
         if (idx < 0) {
             // The message itself is gone (e.g. clearChat raced ahead) —
             // just clear any leftover stream delta and bail.
-            if (_streamingById.value.containsKey(id)) {
-                _streamingById.value = _streamingById.value - id
-            }
+            clearStreamFlushState(id)
+            _streamingById.value = _streamingById.value - id
             return
         }
         val updated = current.toMutableList()
@@ -9937,7 +9942,16 @@ class ChatViewModel(
             isAwaitingModelResponse = isAwaitingModelResponse,
         )
         _messages.value = updated
-        if (_streamingById.value.containsKey(id)) {
+        val st = streamFlushStates[id]
+        val visibleLength = _streamingById.value[id]?.content?.length ?: content.length
+        if (st != null && visibleLength < content.length) {
+            st.pendingContent = content
+            st.pendingBlocks = toolBlocks.toList()
+            st.pendingAwaiting = isAwaitingModelResponse
+            st.finishAfterDrain = true
+            startStreamReveal(id, st)
+        } else {
+            clearStreamFlushState(id)
             _streamingById.value = _streamingById.value - id
         }
     }
@@ -9949,6 +9963,7 @@ class ChatViewModel(
      * snapshots) without forcing the render layer to consult the delta map.
      */
     internal fun effectiveContent(id: String): String? {
+        streamFlushStates[id]?.pendingContent?.let { return it }
         val delta = _streamingById.value[id]
         if (delta != null) return delta.content
         return _messages.value.firstOrNull { it.id == id }?.content
@@ -9963,12 +9978,13 @@ class ChatViewModel(
      */
     private fun flushStreamingDelta(id: String) {
         val delta = _streamingById.value[id] ?: return
+        val completeContent = streamFlushStates[id]?.pendingContent ?: delta.content
         val current = _messages.value
         val idx = current.indexOfLast { it.id == id }
         if (idx >= 0) {
             val updated = current.toMutableList()
             updated[idx] = current[idx].copy(
-                content = delta.content,
+                content = completeContent,
                 isStreaming = false,
                 toolBlocks = delta.toolBlocks,
                 isAwaitingModelResponse = delta.isAwaitingModelResponse,
@@ -9986,8 +10002,9 @@ class ChatViewModel(
 
     /** Drain ALL outstanding streaming deltas (called on global resets). */
     private fun flushAllStreamingDeltas() {
-        clearAllStreamFlushStates()
+        val completeTargets = streamFlushStates.mapValues { it.value.pendingContent }
         val pending = _streamingById.value
+        clearAllStreamFlushStates()
         if (pending.isEmpty()) return
         val current = _messages.value.toMutableList()
         var changed = false
@@ -9995,7 +10012,7 @@ class ChatViewModel(
             val idx = current.indexOfLast { it.id == id }
             if (idx < 0) continue
             current[idx] = current[idx].copy(
-                content = delta.content,
+                content = completeTargets[id] ?: delta.content,
                 isStreaming = false,
                 toolBlocks = delta.toolBlocks,
                 isAwaitingModelResponse = delta.isAwaitingModelResponse,

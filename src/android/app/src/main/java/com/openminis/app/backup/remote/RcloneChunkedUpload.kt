@@ -3,7 +3,13 @@ package com.openminis.app.backup.remote
 import android.content.Context
 import com.openminis.app.backup.BackupFormat
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.util.EncryptedPrefsFactory
+import org.json.JSONObject
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URI
+import java.net.URL
+import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
@@ -206,14 +212,131 @@ class RcloneChunkedUpload(private val context: Context) {
                 runCatching {
                     RcloneBridge.rpc("operations/deletefile", mapOf("fs" to fs, "remote" to partial))
                 }
+                if (isMethodNotAllowed(e.message)) {
+                    try {
+                        if (uploadViaOpenListApi(packageFile, remote, isCancelled, onProgress)) {
+                            AppLogger.info(
+                                TAG,
+                                "[Rclone] WebDAV PUT rejected with 405; uploaded $name " +
+                                    "through the OpenList file API",
+                            )
+                            return
+                        }
+                    } catch (apiError: Exception) {
+                        lastError = apiError
+                        AppLogger.warning(
+                            TAG,
+                            "[Rclone] OpenList API fallback failed: ${apiError.message}",
+                        )
+                    }
+                }
                 AppLogger.warning(
                     TAG,
-                    "[Rclone] upload attempt $attempt to '${remote.name}' failed: ${e.message}"
+                    "[Rclone] upload attempt $attempt to '${remote.name}' failed: " +
+                        "${lastError?.message ?: e.message}"
                 )
                 if (isCancelled()) throw CancelledException()
             }
         }
         throw UploadException(lastError?.message ?: "The remote rejected the upload.")
+    }
+
+    /**
+     * OpenList storage drivers can reject WebDAV PUT with 405 while their
+     * native upload endpoint remains supported. Reuse the WebDAV server,
+     * username, password and selected path so existing destinations need no
+     * migration. This fallback is attempted only after an explicit 405.
+     */
+    private fun uploadViaOpenListApi(
+        packageFile: File,
+        remote: RcloneRemoteStore.Remote,
+        isCancelled: () -> Boolean,
+        onProgress: ((Progress) -> Unit)?,
+    ): Boolean {
+        if (remote.backend != "webdav") return false
+        val webdavUrl = remote.params["url"] ?: return false
+        val target = openListApiTarget(webdavUrl, remote.path, packageFile.name) ?: return false
+        val username = remote.params["user"].orEmpty()
+        if (username.isBlank()) return false
+        val password = EncryptedPrefsFactory.safeCreate(
+            context,
+            "backup_rclone_secrets",
+        ).getString(remote.name, null).orEmpty()
+
+        val loginBody = JSONObject()
+            .put("username", username)
+            .put("password", password)
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+        val login = (URL("${target.baseUrl}/api/auth/login").openConnection() as HttpURLConnection)
+            .apply {
+                requestMethod = "POST"
+                connectTimeout = (RcloneBridge.CONNECT_TIMEOUT_SECONDS * 1_000L).toInt()
+                readTimeout = (RcloneBridge.IO_TIMEOUT_SECONDS * 1_000L).toInt()
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                setFixedLengthStreamingMode(loginBody.size)
+            }
+        val token = try {
+            login.outputStream.use { it.write(loginBody) }
+            val json = requireOpenListSuccess(login)
+            json.optJSONObject("data")?.optString("token").orEmpty()
+                .ifBlank { throw UploadException("OpenList login returned no token.") }
+        } finally {
+            login.disconnect()
+        }
+
+        val upload = (URL("${target.baseUrl}/api/fs/put").openConnection() as HttpURLConnection)
+            .apply {
+                requestMethod = "PUT"
+                connectTimeout = (RcloneBridge.CONNECT_TIMEOUT_SECONDS * 1_000L).toInt()
+                readTimeout = (RcloneBridge.IO_TIMEOUT_SECONDS * 1_000L).toInt()
+                doOutput = true
+                setRequestProperty("Authorization", token)
+                setRequestProperty(
+                    "File-Path",
+                    URLEncoder.encode(target.filePath, Charsets.UTF_8.name()).replace("+", "%20"),
+                )
+                setRequestProperty("As-Task", "false")
+                setRequestProperty("Content-Type", "application/octet-stream")
+                setFixedLengthStreamingMode(packageFile.length())
+            }
+        try {
+            var sent = 0L
+            upload.outputStream.buffered().use { output ->
+                packageFile.inputStream().buffered().use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        if (isCancelled()) throw CancelledException()
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        sent += count
+                        onProgress?.invoke(Progress(sent, packageFile.length()))
+                    }
+                }
+            }
+            requireOpenListSuccess(upload)
+            onProgress?.invoke(Progress(packageFile.length(), packageFile.length()))
+            return true
+        } finally {
+            upload.disconnect()
+        }
+    }
+
+    private fun requireOpenListSuccess(connection: HttpURLConnection): JSONObject {
+        val status = connection.responseCode
+        val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+        val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+        val json = runCatching { JSONObject(body) }.getOrDefault(JSONObject())
+        val apiCode = json.optInt("code", status)
+        if (status !in 200..299 || apiCode !in 200..299) {
+            val message = json.optString("message").ifBlank {
+                "HTTP $status${body.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()}"
+            }
+            throw UploadException("OpenList API upload failed: $message")
+        }
+        return json
     }
 
     /**
@@ -655,6 +778,48 @@ class RcloneChunkedUpload(private val context: Context) {
 
     companion object {
         private const val TAG = "Rclone"
+
+        internal data class OpenListApiTarget(
+            val baseUrl: String,
+            val filePath: String,
+        )
+
+        internal fun isMethodNotAllowed(message: String?): Boolean =
+            message?.contains("405") == true ||
+                message?.contains("Method Not Allowed", ignoreCase = true) == true
+
+        /** Derive the native API origin and mount path from an OpenList /dav URL. */
+        internal fun openListApiTarget(
+            webdavUrl: String,
+            remotePath: String,
+            fileName: String,
+        ): OpenListApiTarget? = runCatching {
+            val uri = URI(webdavUrl.trim())
+            if (uri.scheme !in setOf("http", "https") || uri.rawAuthority.isNullOrBlank()) {
+                return@runCatching null
+            }
+            val decodedPath = uri.path.orEmpty()
+            val lower = decodedPath.lowercase(Locale.ROOT)
+            val davIndex = when {
+                lower.contains("/dav/") -> lower.indexOf("/dav/")
+                lower.endsWith("/dav") -> lower.length - 4
+                else -> return@runCatching null
+            }
+            val rawPath = uri.rawPath.orEmpty()
+            val rawLower = rawPath.lowercase(Locale.ROOT)
+            val rawDavIndex = when {
+                rawLower.contains("/dav/") -> rawLower.indexOf("/dav/")
+                rawLower.endsWith("/dav") -> rawLower.length - 4
+                else -> davIndex
+            }
+            val basePath = rawPath.substring(0, rawDavIndex).trimEnd('/')
+            val baseUrl = "${uri.scheme}://${uri.rawAuthority}$basePath"
+            val davPrefix = decodedPath.substring(davIndex + 4).trim('/')
+            val filePath = listOf(davPrefix, remotePath.trim('/'), fileName.trim('/'))
+                .filter { it.isNotEmpty() }
+                .joinToString("/", prefix = "/")
+            OpenListApiTarget(baseUrl = baseUrl, filePath = filePath)
+        }.getOrNull()
 
         /** 250ms, not 500: Cancel is user-facing and the poll interval is the
          *  floor on how long it appears to hang. */

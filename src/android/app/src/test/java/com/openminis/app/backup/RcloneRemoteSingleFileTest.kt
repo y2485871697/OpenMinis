@@ -98,6 +98,33 @@ class RcloneRemoteSingleFileTest {
         assertEquals("backup-1.minisbak.attempt-b.partial", second)
     }
 
+    @Test
+    fun `openlist api fallback keeps server prefix and dav mount path`() {
+        val target = RcloneChunkedUpload.openListApiTarget(
+            "https://cloud.example.com/openlist/dav/115/phone",
+            "/Minis/backups/",
+            "backup-1.minisbak",
+        )
+
+        requireNotNull(target)
+        assertEquals("https://cloud.example.com/openlist", target.baseUrl)
+        assertEquals("/115/phone/Minis/backups/backup-1.minisbak", target.filePath)
+    }
+
+    @Test
+    fun `non openlist webdav url does not activate api fallback`() {
+        assertEquals(
+            null,
+            RcloneChunkedUpload.openListApiTarget(
+                "https://nextcloud.example.com/remote.php/webdav",
+                "backups",
+                "backup.minisbak",
+            ),
+        )
+        assertTrue(RcloneChunkedUpload.isMethodNotAllowed("405 Method Not Allowed"))
+        assertFalse(RcloneChunkedUpload.isMethodNotAllowed("401 Unauthorized"))
+    }
+
     /** A scratch file must never be offered as a restorable backup. */
     @Test
     fun `in-flight scratch is not listed as a package`() {
