@@ -183,6 +183,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.SideEffect
@@ -529,34 +530,50 @@ private fun liveStreamingDelta(
     var displayedText by remember(messageId, animateTextBlockId) {
         mutableStateOf("")
     }
+    // Keep the presentation loop alive while transport snapshots change. A
+    // rememberUpdatedState gives the loop the newest target without putting
+    // that target in LaunchedEffect's key set (which would cancel/restart the
+    // typewriter on every provider chunk).
+    val latestTargetText = rememberUpdatedState(targetBlockText)
 
-    // A provider chunk may arrive in one burst after a network/read pause.
-    // Advance a small, adaptive number of Unicode code points per tick. Small
-    // gaps stay close to the provider's cadence; large gaps catch up without
-    // freezing the final response behind an overly slow typewriter.
-    LaunchedEffect(messageId, animateTextBlockId, targetBlockText) {
-        if (!targetBlockText.startsWith(displayedText)) {
-            displayedText = ""
-        }
-        while (displayedText.length < targetBlockText.length) {
-            val gap = targetBlockText.codePointCount(displayedText.length, targetBlockText.length)
-            val step = when {
-                gap > 256 -> 4
-                gap > 96 -> 3
-                gap > 24 -> 2
-                else -> 1
-            }
-            var next = displayedText.length
-            repeat(step) {
-                if (next < targetBlockText.length) {
-                    next = targetBlockText.offsetByCodePoints(next, 1)
+    // Provider reads can contain a whole paragraph after a network pause. The
+    // received snapshot is the buffer; this fixed frame-paced loop is the
+    // presentation clock. It deliberately releases a constant two Unicode
+    // code points every ~32ms instead of speeding up for larger backlogs, so
+    // a slow/fast network cannot turn into visible bursts or variable typing
+    // speed. A long UI frame is capped to one release, never a catch-up burst.
+    LaunchedEffect(messageId, animateTextBlockId) {
+        val frameIntervalNs = 32_000_000L
+        val codePointsPerFrame = 2
+        var previousFrameNs = 0L
+        var elapsedNs = 0L
+        while (true) {
+            withFrameNanos { nowNs ->
+                if (previousFrameNs != 0L) {
+                    elapsedNs = (elapsedNs + (nowNs - previousFrameNs))
+                        .coerceAtMost(frameIntervalNs * 2)
                 }
+                previousFrameNs = nowNs
             }
-            displayedText = targetBlockText.substring(0, next)
-            if (displayedText.length < targetBlockText.length) {
-                // 32ms gives a stable ~30Hz text cadence without scheduling a
-                // main-thread task for every provider event.
-                kotlinx.coroutines.delay(32L)
+            val targetText = latestTargetText.value
+            if (!targetText.startsWith(displayedText)) {
+                // A retry/replacement is a new prefix; never expose a stale
+                // fragment, but also do not replay it character by character.
+                displayedText = targetText
+                elapsedNs = 0L
+            } else if (elapsedNs >= frameIntervalNs && displayedText.length < targetText.length) {
+                elapsedNs -= frameIntervalNs
+                var next = displayedText.length
+                repeat(codePointsPerFrame) {
+                    if (next < targetText.length) {
+                        next = targetText.offsetByCodePoints(next, 1)
+                    }
+                }
+                displayedText = targetText.substring(0, next)
+            } else if (elapsedNs >= frameIntervalNs) {
+                // No pending text: discard accumulated time so the first new
+                // chunk starts on the normal cadence instead of jumping.
+                elapsedNs = 0L
             }
         }
     }
