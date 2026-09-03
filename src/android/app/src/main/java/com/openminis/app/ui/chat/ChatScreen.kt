@@ -495,13 +495,20 @@ private fun sameStreamingLayout(
     return true
 }
 
+@OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
 private fun liveStreamingDelta(
     viewModel: ChatViewModel,
     messageId: String,
 ): StreamingDelta? {
     val flow = remember(viewModel, messageId) {
-        viewModel.streamingById.map { it[messageId] }
+        // Publish at most once per display frame. Provider SSE chunks can be
+        // much faster than Compose can measure/render; forwarding every one
+        // creates uneven catch-up bursts after a busy frame. RikkaHub's live
+        // renderer has the same frame-paced boundary.
+        viewModel.streamingById
+            .map { it[messageId] }
+            .sample(16L)
     }
     val delta by flow.collectAsState(initial = null)
     return delta
