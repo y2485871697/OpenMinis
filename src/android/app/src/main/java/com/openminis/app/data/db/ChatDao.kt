@@ -304,8 +304,34 @@ interface ChatDao {
     // boundary cut: deleteMessagesAfter drops whole rows after the boundary,
     // but the kept assistant row itself needs its parts trimmed to before the
     // target tool_use — that's an UPDATE of an existing row, not a delete.
-    @Query("UPDATE messages SET parts_json = :partsJson, updated_at = :updatedAt WHERE id = :id")
+    @Query(
+        "UPDATE messages SET parts_json = :partsJson, translation_text = NULL, " +
+            "translation_language = NULL, updated_at = :updatedAt WHERE id = :id",
+    )
     suspend fun updateMessageParts(id: String, partsJson: String, updatedAt: Long = System.currentTimeMillis())
+
+    @Query(
+        "UPDATE messages SET translation_text = :text, translation_language = :language, " +
+            "updated_at = :updatedAt WHERE id = :messageId",
+    )
+    suspend fun updateMessageTranslation(
+        messageId: String,
+        text: String?,
+        language: String?,
+        updatedAt: Long = System.currentTimeMillis(),
+    ): Int
+
+    @Query(
+        "UPDATE messages SET translation_text = NULL, translation_language = NULL, " +
+            "updated_at = :updatedAt WHERE id = :messageId " +
+            "AND translation_text = :expectedText AND translation_language = :expectedLanguage",
+    )
+    suspend fun clearMessageTranslationIfMatches(
+        messageId: String,
+        expectedText: String,
+        expectedLanguage: String,
+        updatedAt: Long = System.currentTimeMillis(),
+    ): Int
 
     // [T-error-persist-android] Write/clear the terminal error sticker on a
     // specific message row by id. Used when the persisted DB id is known

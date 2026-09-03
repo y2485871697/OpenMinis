@@ -223,6 +223,36 @@ class RcloneChunkedUpload(private val context: Context) {
                             return
                         }
                     } catch (apiError: Exception) {
+                        if (isOpenList189TimeParseFailure(apiError.message)) {
+                            // OpenList 4.2.5's 189pc/189_tv driver can upload
+                            // the object and then fail while parsing its returned
+                            // timestamp. Verify the final object before treating
+                            // that post-write parsing failure as an upload error.
+                            val uploaded = runCatching { remoteSize(fs, final) }.getOrNull()
+                            if (uploaded != null && uploaded != size) {
+                                throw UploadException(
+                                    "OpenList committed $uploaded bytes but the backup is $size bytes."
+                                )
+                            }
+                            // This exact error is raised while decoding the
+                            // successful commit response, after the file was
+                            // written. The same broken timestamp can also make
+                            // a follow-up stat fail, so accept the commit rather
+                            // than uploading a duplicate on the next attempt.
+                            onProgress?.invoke(Progress(size, size))
+                            AppLogger.warning(
+                                TAG,
+                                if (uploaded == size) {
+                                    "[Rclone] OpenList returned its legacy Tianyi timestamp " +
+                                        "error after upload; $name is size-verified."
+                                } else {
+                                    "[Rclone] OpenList returned its legacy Tianyi timestamp " +
+                                        "error after committing $name; metadata verification " +
+                                        "is unavailable until OpenList v4.2.6."
+                                },
+                            )
+                            return
+                        }
                         lastError = apiError
                         AppLogger.warning(
                             TAG,
@@ -317,6 +347,12 @@ class RcloneChunkedUpload(private val context: Context) {
                 }
             }
             requireOpenListSuccess(upload)
+            val uploaded = remoteSize(remote.fsSpec, remote.join(packageFile.name))
+            if (uploaded != packageFile.length()) {
+                throw UploadException(
+                    "OpenList committed $uploaded bytes but the backup is ${packageFile.length()} bytes."
+                )
+            }
             onProgress?.invoke(Progress(packageFile.length(), packageFile.length()))
             return true
         } finally {
@@ -328,8 +364,16 @@ class RcloneChunkedUpload(private val context: Context) {
         val status = connection.responseCode
         val stream = if (status in 200..299) connection.inputStream else connection.errorStream
         val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-        val json = runCatching { JSONObject(body) }.getOrDefault(JSONObject())
-        val apiCode = json.optInt("code", status)
+        val json = runCatching { JSONObject(body) }.getOrElse {
+            throw UploadException(
+                "OpenList returned ${if (body.isBlank()) "an empty" else "a non-JSON"} " +
+                    "response (HTTP $status)."
+            )
+        }
+        if (!json.has("code")) {
+            throw UploadException("OpenList response did not include a result code (HTTP $status).")
+        }
+        val apiCode = json.optInt("code", -1)
         if (status !in 200..299 || apiCode !in 200..299) {
             val message = json.optString("message").ifBlank {
                 "HTTP $status${body.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()}"
@@ -787,6 +831,15 @@ class RcloneChunkedUpload(private val context: Context) {
         internal fun isMethodNotAllowed(message: String?): Boolean =
             message?.contains("405") == true ||
                 message?.contains("Method Not Allowed", ignoreCase = true) == true
+
+        internal fun isOpenList189TimeParseFailure(message: String?): Boolean {
+            val text = message.orEmpty()
+            return text.contains("parsing time", ignoreCase = true) &&
+                (
+                    text.contains("Jan 2, 2006 15:04:05 PM -07") ||
+                        text.contains("Jan 2, 2006 3:04:05 PM -07")
+                )
+        }
 
         /** Derive the native API origin and mount path from an OpenList /dav URL. */
         internal fun openListApiTarget(

@@ -64,6 +64,9 @@ import com.openminis.app.offload.OffloadPermissionManager
 import com.openminis.app.service.SessionActivityTracker
 import com.openminis.app.service.SessionConcurrencyManager
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -79,10 +82,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.yield
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 
@@ -370,9 +373,6 @@ class ChatViewModel(
             }
             return null
         }
-        // [T-android-stream-flush-dualpath] Newline fast-path thresholds (iOS parity).
-        private const val NEWLINE_FLUSH_MIN_CHARS = 50
-        private const val NEWLINE_FLUSH_MAX_LEN = 5_000
         // [T-android-larky-longsession-followup] see uiMessages / hasOlderMessages.
         /** Tail window size used by [uiMessages] when a session exceeds it. */
         const val INITIAL_VISIBLE_MESSAGE_CAP: Int = 200
@@ -657,112 +657,26 @@ class ChatViewModel(
     private val _streamingById = MutableStateFlow<Map<String, StreamingDelta>>(emptyMap())
     val streamingById: StateFlow<Map<String, StreamingDelta>> = _streamingById.asStateFlow()
 
-    /**
-     * [T-android-stream-flush-dualpath] Per-message streaming-flush state for
-     * the dual-path throttle in [updateAssistantMessage]. Keyed by messageId so
-     * the throttle accumulator survives the high-frequency token calls (the
-     * earlier per-fragment produceState version reset every fragment rebuild and
-     * so never actually throttled — diagnostics showed every tick flushing).
-     * Mirrors iOS AIChatViewModel+SSEStream's lastTextDeltaFlush/…Length.
-     */
-    private class StreamFlushState {
-        var lastFlushMs: Long = 0L
-        var lastFlushedLen: Int = 0
-        var trailingJob: Job? = null
-        // [T-android-stream-flush-review] Freshest suppressed delta. Updated on
-        // EVERY throttled tick so the trailing job publishes the latest content
-        // (not the stale value captured when the job was first scheduled) — a
-        // burst of sub-throttle deltas followed by a pause would otherwise leave
-        // the side channel several deltas behind.
-        var pendingContent: String? = null
-        var pendingBlocks: List<AssistantBlock> = emptyList()
-        var pendingAwaiting: Boolean = false
-        /** Keep the render overlay until the final text has been paced out. */
-        var finishAfterDrain: Boolean = false
-    }
+    /** Complete provider snapshot used by every stream-termination path. */
+    private class StreamFlushState(
+        var latestContent: String,
+        var latestBlocks: List<AssistantBlock>,
+        var latestAwaiting: Boolean,
+    )
     private val streamFlushStates = HashMap<String, StreamFlushState>()
 
-    /**
-     * [T-android-stream-flush-review] Cancel a message's pending trailing flush
-     * and drop its throttle accumulator. Call from EVERY stream-termination
-     * path (natural end, cancel, turn-limit, retry-truncate, clearChat) so a
-     * trailing coroutine — which runs on viewModelScope, NOT streamJob, and is
-     * therefore NOT cancelled by streamJob.cancel() — can't fire after the
-     * side channel was drained and re-revive a stale "thinking" overlay row.
-     */
+    /** Drop a message's live snapshot on every stream-termination path. */
     private fun clearStreamFlushState(id: String) {
-        streamFlushStates.remove(id)?.trailingJob?.cancel()
+        streamFlushStates.remove(id)
     }
     private fun clearAllStreamFlushStates() {
-        streamFlushStates.values.forEach { it.trailingJob?.cancel() }
         streamFlushStates.clear()
     }
-    /** Cancel + drop flush states for any message id NOT in [keptIds] (retry/truncate). */
+    /** Drop flush states for any message id NOT in [keptIds] (retry/truncate). */
     private fun retainStreamFlushStates(keptIds: Set<String>) {
         val drop = streamFlushStates.keys.filter { it !in keptIds }
-        for (id in drop) streamFlushStates.remove(id)?.trailingJob?.cancel()
+        for (id in drop) streamFlushStates.remove(id)
     }
-
-    // Render cadence stays close to the display frame rate even for long
-    // replies. The old 100..1000 ms tiers visibly released whole lines at once.
-    private fun streamFlushThrottleMs(len: Int): Long = when {
-        len < 32_000 -> 16L
-        len < 128_000 -> 24L
-        else -> 32L
-    }
-
-    /**
-     * Reveal provider bursts as a steady typewriter stream. SSE servers are
-     * allowed to put a paragraph in one event; time throttling alone therefore
-     * cannot prevent a two-line jump. This drain caps every visible update to a
-     * handful of UTF-16 code units and keeps consuming the freshest target.
-     */
-    private fun startStreamReveal(id: String, state: StreamFlushState) {
-        if (state.trailingJob != null) return
-        state.trailingJob = viewModelScope.launch {
-            try {
-                while (streamFlushStates[id] === state) {
-                    val target = state.pendingContent ?: break
-                    val current = state.lastFlushedLen.coerceIn(0, target.length)
-                    var end = (current + streamRevealCharsPerTick).coerceAtMost(target.length)
-                    if (end < target.length && end > current &&
-                        Character.isHighSurrogate(target[end - 1])
-                    ) {
-                        end--
-                    }
-                    if (end <= current && current < target.length) end = current + 1
-                    val visible = target.substring(0, end)
-                    _streamingById.value = _streamingById.value + (
-                        id to StreamingDelta(
-                            content = visible,
-                            toolBlocks = state.pendingBlocks,
-                            isAwaitingModelResponse = state.pendingAwaiting,
-                        )
-                    )
-                    state.lastFlushMs = System.currentTimeMillis()
-                    state.lastFlushedLen = visible.length
-
-                    if (end >= target.length && state.pendingContent == target) {
-                        state.pendingContent = null
-                        break
-                    }
-                    kotlinx.coroutines.delay(streamFlushThrottleMs(target.length))
-                }
-            } finally {
-                state.trailingJob = null
-                if (streamFlushStates[id] === state) {
-                    if (state.pendingContent != null) {
-                        startStreamReveal(id, state)
-                    } else if (state.finishAfterDrain) {
-                        streamFlushStates.remove(id)
-                        _streamingById.value = _streamingById.value - id
-                    }
-                }
-            }
-        }
-    }
-
-    private val streamRevealCharsPerTick = 8
 
     /**
      * Composer draft. Owned by VM so it survives navigation (e.g. push EnvVars
@@ -929,8 +843,22 @@ class ChatViewModel(
 
     private val _messageTranslations = MutableStateFlow<Map<String, String>>(emptyMap())
     val messageTranslations: StateFlow<Map<String, String>> = _messageTranslations.asStateFlow()
+    private val _messageTranslationLanguages = MutableStateFlow<Map<String, String>>(emptyMap())
+    val messageTranslationLanguages: StateFlow<Map<String, String>> =
+        _messageTranslationLanguages.asStateFlow()
     private val _translatingMessageIds = MutableStateFlow<Set<String>>(emptySet())
     val translatingMessageIds: StateFlow<Set<String>> = _translatingMessageIds.asStateFlow()
+    /** Main-thread generations invalidate superseded translation responses. */
+    private val translationGenerations = mutableMapOf<String, Long>()
+
+    /**
+     * Translation writes and source mutations for one rendered message must be
+     * ordered together. The queue closes the gap between a main-thread
+     * generation check and the suspend Room write without serializing unrelated
+     * messages.
+     */
+    private val translationDbQueueLock = Any()
+    private val translationDbQueueTails = mutableMapOf<String, Job>()
 
     private val _modelName = MutableStateFlow("")
     val modelName: StateFlow<String> = _modelName.asStateFlow()
@@ -4341,6 +4269,12 @@ class ChatViewModel(
                 }
                 applyCompactMarkerGraying(ordered, marker, loaded.messages, historyDbIds)
             }
+            _messageTranslations.value = ordered.mapNotNull { message ->
+                message.translation?.takeIf { it.isNotBlank() }?.let { message.id to it }
+            }.toMap()
+            _messageTranslationLanguages.value = ordered.mapNotNull { message ->
+                message.translationLanguage?.takeIf { it.isNotBlank() }?.let { message.id to it }
+            }.toMap()
 
             // Cold-start interrupt detection: an agent loop that was killed by
             // the OS (or app force-quit) leaves agentHistory in one of four
@@ -5085,10 +5019,11 @@ class ChatViewModel(
         // T-streaming-side-channel: ensure no stale stream delta survives a
         // session wipe; the messages list is about to be cleared, so any
         // pending key would be orphaned.
-        // [T-android-stream-flush-review] also cancel pending trailing flushes
+        // Also cancel pending reveal jobs
         // so none re-adds an orphan side-channel entry after the wipe.
         clearAllStreamFlushStates()
         _streamingById.value = emptyMap()
+        invalidateAssistantTranslations(_messages.value, clearPersisted = false)
         // Memory state — match iOS clearChat() field list one-for-one.
         _messages.value = emptyList()
         agentHistory.clear()
@@ -5292,6 +5227,7 @@ class ChatViewModel(
         )
         val deletedMessages = listOf(droppedTargetTail) +
             messages.subList(asstIdx + 1, messages.size).toList()
+        invalidateAssistantTranslations(deletedMessages, clearPersisted = false)
 
         // Claim the streaming flag synchronously so a rapid second tap is
         // rejected by the entry guard (same rationale as retryFromMessage T145).
@@ -5371,6 +5307,9 @@ class ChatViewModel(
                     val cur = _messages.value
                     val ai = cur.indexOfFirst { it.id == assistantMessageId }
                     if (ai >= 0) {
+                        _messageTranslations.value = _messageTranslations.value - assistantMessageId
+                        _messageTranslationLanguages.value =
+                            _messageTranslationLanguages.value - assistantMessageId
                         val keptBlocks = cur[ai].toolBlocks.take(blockIdx)
                         if (keptBlocks.isEmpty()) {
                             // [T-android-rerun-from-tool-deletes-earlier-turns]
@@ -5392,6 +5331,8 @@ class ChatViewModel(
                                 content = keptText,
                                 toolBlocks = keptBlocks,
                                 isStreaming = false,
+                                translation = null,
+                                translationLanguage = null,
                             )
                             _messages.value = cur.subList(0, ai).toList() + trimmed
                         }
@@ -5449,6 +5390,7 @@ class ChatViewModel(
         // memory_write tool blocks they contain. Without this, a retry leaves
         // the on-disk daily log with entries the user has just rewound past.
         val deletedMessages = messages.subList(index + 1, messages.size).toList()
+        invalidateAssistantTranslations(deletedMessages, clearPersisted = false)
 
         // Truncate UI messages: keep up to and including this user message.
         // T189: if the retried bubble was still in the queued state (manual
@@ -5585,6 +5527,7 @@ class ChatViewModel(
         // can be revoked — otherwise the on-disk daily log keeps entries from
         // messages the user just deleted.
         val deletedMessages = messages.subList(index, messages.size).toList()
+        invalidateAssistantTranslations(deletedMessages, clearPersisted = false)
 
         // Truncate the UI to everything BEFORE the target message, and drop
         // any queued prompts that belonged to the deleted range so a later
@@ -5637,23 +5580,104 @@ class ChatViewModel(
         }
     }
 
+    private fun translationSource(message: ChatMessage): String = message.toolBlocks
+        .filter { it.kind == "text" && it.content.isNotBlank() }
+        .joinToString("\n\n") { it.content }
+        .ifBlank { message.content }
+
+    /** Advance the per-message generation. Called only from main-thread UI entry points. */
+    private fun advanceTranslationGeneration(messageId: String): Long {
+        val next = (translationGenerations[messageId] ?: 0L) + 1L
+        translationGenerations[messageId] = next
+        return next
+    }
+
+    /**
+     * Enqueue a Room mutation behind every earlier translation/source mutation
+     * for the same rendered message. Failures are delivered through the returned
+     * deferred, while the queue worker itself completes normally so later work
+     * is never poisoned by an earlier failed operation.
+     */
+    private fun <T> enqueueTranslationDbOperation(
+        messageId: String,
+        operation: suspend () -> T,
+    ): Deferred<T> {
+        val result = CompletableDeferred<T>()
+        synchronized(translationDbQueueLock) {
+            val previous = translationDbQueueTails[messageId]
+            val queued = viewModelScope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
+                try {
+                    previous?.join()
+                    result.complete(operation())
+                } catch (error: Throwable) {
+                    result.completeExceptionally(error)
+                    if (error is CancellationException) throw error
+                }
+            }
+            translationDbQueueTails[messageId] = queued
+            queued.invokeOnCompletion { cause ->
+                if (cause != null && !result.isCompleted) {
+                    result.completeExceptionally(cause)
+                }
+                synchronized(translationDbQueueLock) {
+                    if (translationDbQueueTails[messageId] === queued) {
+                        translationDbQueueTails.remove(messageId)
+                    }
+                }
+            }
+            queued.start()
+        }
+        return result
+    }
+
+    private fun isTranslationRequestCurrent(
+        messageId: String,
+        generation: Long,
+        source: String,
+        targetDbId: String,
+    ): Boolean {
+        val current = _messages.value.firstOrNull { it.id == messageId }
+        return translationGenerations[messageId] == generation &&
+            messageId in _translatingMessageIds.value &&
+            current != null &&
+            current.role == "assistant" &&
+            targetDbId in current.sourceDbIds &&
+            translationSource(current) == source
+    }
+
+    private fun translationPromptName(languageTag: String): String = when (languageTag) {
+        "zh-Hans" -> "Simplified Chinese"
+        "zh-Hant" -> "Traditional Chinese"
+        "en" -> "English"
+        "ja" -> "Japanese"
+        "ko" -> "Korean"
+        "fr" -> "French"
+        "de" -> "German"
+        "es" -> "Spanish"
+        "it" -> "Italian"
+        else -> languageTag
+    }
+
     /** Translate a completed reply with the concrete provider already bound to this chat. */
-    fun translateAssistantMessage(messageId: String, targetLanguage: String) {
-        if (messageId in _translatingMessageIds.value) return
+    fun translateAssistantMessage(messageId: String, targetLanguageTag: String) {
+        if (_isStreaming.value || messageId in _translatingMessageIds.value) return
         val message = _messages.value.firstOrNull { it.id == messageId && it.role == "assistant" } ?: return
-        val source = message.toolBlocks
-            .filter { it.kind == "text" && it.content.isNotBlank() }
-            .joinToString("\n\n") { it.content }
-            .ifBlank { message.content }
+        val source = translationSource(message)
         if (source.isBlank()) return
         val provider = currentProvider ?: run {
             _error.value = "No provider configured"
             return
         }
+        val targetDbId = message.sourceDbIds.lastOrNull() ?: run {
+            _error.value = "The reply is still being saved. Try again in a moment."
+            return
+        }
+        val requestGeneration = advanceTranslationGeneration(messageId)
 
-        _translatingMessageIds.value = _translatingMessageIds.value + messageId
+        _translatingMessageIds.update { it + messageId }
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                val targetLanguage = translationPromptName(targetLanguageTag)
                 val response = provider.sendMessage(
                     messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = source)),
                     systemPrompt = "Translate the user's text into $targetLanguage. Preserve Markdown structure and code blocks. Return only the translation.",
@@ -5665,16 +5689,146 @@ class ChatViewModel(
                 )
                 val translated = response.text.trim()
                 if (translated.isNotEmpty()) {
-                    _messageTranslations.value = _messageTranslations.value + (messageId to translated)
+                    enqueueTranslationDbOperation(messageId) dbWrite@{
+                        val stillCurrentBeforeWrite = withContext(Dispatchers.Main) {
+                            isTranslationRequestCurrent(
+                                messageId = messageId,
+                                generation = requestGeneration,
+                                source = source,
+                                targetDbId = targetDbId,
+                            )
+                        }
+                        if (!stillCurrentBeforeWrite) return@dbWrite
+
+                        if (!persistMessageTranslation(
+                            messageDbId = targetDbId,
+                            language = targetLanguageTag,
+                            translation = translated,
+                        )) return@dbWrite
+
+                        val accepted = withContext(Dispatchers.Main) {
+                            if (!isTranslationRequestCurrent(
+                                    messageId = messageId,
+                                    generation = requestGeneration,
+                                    source = source,
+                                    targetDbId = targetDbId,
+                                )
+                            ) {
+                                false
+                            } else {
+                                _messageTranslations.update { it + (messageId to translated) }
+                                _messageTranslationLanguages.update {
+                                    it + (messageId to targetLanguageTag)
+                                }
+                                _messages.update { messages ->
+                                    messages.map { item ->
+                                        if (item.id == messageId) {
+                                            item.copy(
+                                                translation = translated,
+                                                translationLanguage = targetLanguageTag,
+                                            )
+                                        } else {
+                                            item
+                                        }
+                                    }
+                                }
+                                true
+                            }
+                        }
+                        if (!accepted) {
+                            // This rollback is part of the same per-message DB
+                            // operation. A newer write cannot interleave here,
+                            // so equal translated text/language is not an ABA.
+                            chatRepository.clearMessageTranslationIfMatches(
+                                targetDbId,
+                                expectedText = translated,
+                                expectedLanguage = targetLanguageTag,
+                            )
+                        }
+                    }.await()
                 }
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
-                _error.value = "Translation failed: ${error.message ?: error.javaClass.simpleName}"
+                withContext(Dispatchers.Main) {
+                    if (translationGenerations[messageId] == requestGeneration &&
+                        messageId in _translatingMessageIds.value
+                    ) {
+                        _error.value =
+                            "Translation failed: ${error.message ?: error.javaClass.simpleName}"
+                    }
+                }
             } finally {
-                _translatingMessageIds.value = _translatingMessageIds.value - messageId
+                withContext(Dispatchers.Main) {
+                    if (translationGenerations[messageId] == requestGeneration) {
+                        _translatingMessageIds.update { it - messageId }
+                    }
+                }
             }
         }
     }
+
+    fun clearAssistantMessageTranslation(messageId: String) {
+        val message = _messages.value.firstOrNull {
+            it.id == messageId && it.role == "assistant"
+        } ?: return
+        invalidateAssistantTranslation(message)
+    }
+
+    /** Invalidate display and, when requested, enqueue the matching storage clear. */
+    private fun invalidateAssistantTranslation(
+        message: ChatMessage,
+        clearPersisted: Boolean = true,
+    ) {
+        val messageId = message.id
+        advanceTranslationGeneration(messageId)
+        _translatingMessageIds.update { it - messageId }
+        _messageTranslations.update { it - messageId }
+        _messageTranslationLanguages.update { it - messageId }
+        _messages.update { messages -> messages.map { current ->
+            if (current.id == messageId) {
+                current.copy(translation = null, translationLanguage = null)
+            } else {
+                current
+            }
+        } }
+        val targetDbIds = message.sourceDbIds.distinct()
+        if (clearPersisted && targetDbIds.isNotEmpty()) {
+            enqueueTranslationDbOperation(messageId) {
+                try {
+                    targetDbIds.forEach { targetDbId ->
+                        persistMessageTranslation(targetDbId, language = null, translation = null)
+                    }
+                } catch (error: Throwable) {
+                    if (error is CancellationException) throw error
+                    AppLogger.warning(
+                        TAG,
+                        "Failed to clear persisted translation: ${error.message}",
+                    )
+                }
+            }
+        }
+    }
+
+    private fun invalidateAssistantTranslations(
+        messages: Iterable<ChatMessage>,
+        clearPersisted: Boolean,
+    ) {
+        messages
+            .filter { it.role == "assistant" }
+            .distinctBy { it.id }
+            .forEach { invalidateAssistantTranslation(it, clearPersisted) }
+    }
+
+    /** Store display-only translation metadata without changing model history. */
+    private suspend fun persistMessageTranslation(
+        messageDbId: String,
+        language: String?,
+        translation: String?,
+    ): Boolean = chatRepository.updateMessageTranslation(
+        messageDbId,
+        translation,
+        language,
+    ) == 1
 
     /** Replace a completed assistant reply and persist the edit across restarts. */
     fun editAssistantMessage(messageId: String, newText: String) {
@@ -5693,21 +5847,28 @@ class ChatViewModel(
                 )
             ),
             error = null,
+            translation = null,
+            translationLanguage = null,
         )
         _messages.value = snapshot.toMutableList().also { it[index] = updated }
-        _messageTranslations.value = _messageTranslations.value - messageId
+        invalidateAssistantTranslation(updated, clearPersisted = false)
 
         val sourceIds = old.sourceDbIds
         if (sourceIds.isEmpty()) return
         val sid = activeSessionId
-        viewModelScope.launch(Dispatchers.IO) {
-            val partsJson = buildAssistantPartsJson(listOf(AgentContentPart.Text(newText)))
-            sourceIds.forEachIndexed { sourceIndex, id ->
-                chatRepository.updateMessageParts(id, if (sourceIndex == 0) partsJson else "[]")
+        enqueueTranslationDbOperation(messageId) {
+            try {
+                val partsJson = buildAssistantPartsJson(listOf(AgentContentPart.Text(newText)))
+                sourceIds.forEachIndexed { sourceIndex, id ->
+                    chatRepository.updateMessageParts(id, if (sourceIndex == 0) partsJson else "[]")
+                }
+                chatRepository.updateSessionPreview(sid, partsJson)
+                agentHistory.clear()
+                chatRepository.loadMessages(sid).forEach { agentHistory.add(it.toLLMMessage()) }
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                AppLogger.warning(TAG, "Failed to persist edited assistant message: ${error.message}")
             }
-            chatRepository.updateSessionPreview(sid, partsJson)
-            agentHistory.clear()
-            chatRepository.loadMessages(sid).forEach { agentHistory.add(it.toLLMMessage()) }
         }
     }
 
@@ -5862,6 +6023,7 @@ class ChatViewModel(
                     SessionActivityTracker.markStreamError(activeSessionId)
                 } finally {
                     AppLogger.info(TAG_STREAM, "$label streamJob FINALLY enter")
+                    drainStreamingSideChannelAfterLoop()
                     // [T-android-overlay-reply-status-34599] Surface
                     // the assistant's most recent reply text to the
                     // overlay BEFORE setInactive so the post-completion
@@ -6038,6 +6200,9 @@ class ChatViewModel(
         if (index < 0) return
 
         val deletedMessages = messages.subList(index, messages.size).toList()
+        withContext(Dispatchers.Main) {
+            invalidateAssistantTranslations(deletedMessages, clearPersisted = false)
+        }
         // [T-android-uimessages-sublist-cme] Defensive: without `.toList()` this
         // stores a live subList VIEW as `_messages.value`.
         //
@@ -6759,6 +6924,7 @@ class ChatViewModel(
                         SessionActivityTracker.markStreamError(activeSessionId)
                     } finally {
                         AppLogger.info(TAG_STREAM, "send streamJob FINALLY enter")
+                        drainStreamingSideChannelAfterLoop()
                         // [T-android-overlay-reply-status-34599] Surface
                         // the assistant's most recent reply text to the
                         // overlay BEFORE setInactive so the post-completion
@@ -6951,6 +7117,7 @@ class ChatViewModel(
             toolBlocks = keptToolBlocks,
         )
         _messages.value = msgs
+        invalidateAssistantTranslation(msgs[lastAssistantIdx])
         // [T-error-persist-android] Clear the persisted error sticker on the last
         // assistant row up-front. The DB-sync below only DELETES the trailing
         // assistant row when a trailing assistant was popped (Case A); in the
@@ -7093,6 +7260,7 @@ class ChatViewModel(
                         SessionActivityTracker.markStreamError(activeSessionId)
                     } finally {
                         AppLogger.info(TAG_STREAM, "retryLast streamJob FINALLY enter")
+                        drainStreamingSideChannelAfterLoop()
                         // [T-android-overlay-reply-status-34599] Surface
                         // the assistant's most recent reply text to the
                         // overlay BEFORE setInactive so the post-completion
@@ -7611,49 +7779,16 @@ class ChatViewModel(
         var accumulatedText = ""
         var lastContextTokens = 0  // updated each turn from API usage
 
-        // T94 fix 2: throttle text-delta UI updates to ~20fps (50ms).
-        // Pre-T94 the LLMStreamChunk.Text branch hopped to Dispatchers.Main
-        // for every chunk — Anthropic SSE on a slow turn fires 50-100 deltas
-        // per second, each one triggering a full _messages.value reassignment
-        // and a Compose recomposition of the whole chat list. The combined
-        // Main-thread cost is what saturated the touch-event queue and
-        // produced the "Waited 5001ms for MotionEvent" ANRs we saw on
-        // host.example.com. We coalesce deltas in `pendingChunkText` and only
-        // flip the UI on a 50ms timer; the per-stream end and per-retry
-        // rollback paths flush whatever's pending so no characters are lost.
-        // T256: tiered streaming throttle, mirrors iOS AIChatViewModel.swift
-        // 6135-6155. The fixed 50ms window saturated the Pixel 4a UI thread
-        // (95p frame 77ms / 29% janky). 6-segment ladder lets short replies
-        // stay snappy (150ms ≈ 6.5 fps which is fine for <500-char snippets)
-        // while long-form output (>32k chars) drops to 0.5-2s gates.
-        // Newline fast-path keeps short messages flowing at human-readable
-        // pace while still avoiding the per-token recompose storm.
-        var lastUiUpdateMs = 0L
-        var lastFlushedLen = 0
-        // T307: per-delta String += chunk.text on Pixel-class heaps was O(n²)
-        // — every SSE chunk allocated a fresh String the size of turnText so
-        // far, then GC walked the entire char[]. DeepSeek V4 emitting long
-        // multilingual + emoji turns blew past the 256 MB heap on Pixel 4a,
-        // showing up as `AbstractStringBuilder.append:548` in
-        // `ChatViewModel$runAgentLoop$5.emit`. Switch the three hot per-delta
-        // accumulators (`pendingChunkText`, `turnText`, and the trailing
-        // text-block's growing `content`) to StringBuilder so growth is
-        // amortised O(n). Cross-turn `accumulatedText` is unaffected — it
-        // grows per turn, not per delta.
-        val pendingChunkSb = StringBuilder()
+        // Keep provider accumulation amortised O(n). The immutable snapshot is
+        // materialised once per provider text chunk and sent through the live
+        // side-channel; it never mutates the top-level messages list mid-turn.
+        // This matches RikkaHub's chunk-driven stream semantics and avoids the
+        // old 150-2000ms gate that made several lines appear at once.
         // T256 tier 2: per-tool-kind input-delta gates. file_write/file_edit
         // pills churn JSON the user can't read anyway — 1Hz update is plenty;
         // other tools get 5Hz so command/url previews stay legible.
         var lastFileToolInputMs = 0L
         var lastOtherToolInputMs = 0L
-        fun textDeltaThrottleMs(len: Int): Long = when {
-            len < 500     -> 150L
-            len < 2_000   -> 300L
-            len < 32_000  -> 500L
-            len < 64_000  -> 1_000L
-            len < 128_000 -> 1_500L
-            else          -> 2_000L
-        }
 
         // Fallback state — mirrors iOS streamWithGroupFallback
         var currentProvider = provider
@@ -7905,10 +8040,11 @@ class ChatViewModel(
             // only the NEW parts from this turn (not the full accumulated history).
             // Matches iOS's per-turn RawMessage persistence.
             val turnStartBlockIndex = allToolBlocks.size
-            // T307: per-delta StringBuilder for the running turn text + the
-            // currently-open trailing text block. `turnText` snapshots are
-            // taken (via .toString()) at flush boundaries only, never per
-            // delta. `currentTextBlockSb` mirrors the trailing text block's
+            // T307: StringBuilders for the running turn text + currently-open
+            // trailing text block avoid `String +=` while accumulating. An
+            // immutable snapshot is still required for each provider chunk we
+            // publish, and once more at the turn boundary. `currentTextBlockSb`
+            // mirrors the trailing text block's
             // growing content; reset to a fresh builder whenever a new text
             // block opens (which happens after a tool_use / thinking break
             // interrupts the text run).
@@ -8082,7 +8218,12 @@ class ChatViewModel(
                             updateAssistantMessage(assistantId, accumulatedText + turnTextSb.toString(), true, allToolBlocks)
                         }
                     }
-                    is LLMStreamChunk.Text -> {
+                    is LLMStreamChunk.Text -> withContext(NonCancellable + Dispatchers.Main) {
+                        // Serialize chunk acceptance with the UI Stop action. If
+                        // Stop won the Main queue this chunk is not accepted; if
+                        // this block won, cancelStream's drain necessarily sees
+                        // the complete immutable snapshot published below.
+                        if (!_isStreaming.value) return@withContext
                         // [T-android-readaloud-stop-stale] First actual text of
                         // this reply — stop the previous reply's Read Aloud so
                         // old and new audio don't overlap. Deferred to here
@@ -8099,18 +8240,20 @@ class ChatViewModel(
                         if (thinkIdx >= 0 && allToolBlocks[thinkIdx].toolStatus != ToolBlockStatus.SUCCESS) {
                             allToolBlocks[thinkIdx] = allToolBlocks[thinkIdx].copy(toolStatus = ToolBlockStatus.SUCCESS)
                         }
-                        // T307: append-only on the StringBuilder; .toString()
-                        // is taken once below at flush time, not per delta.
+                        // T307: append-only accumulation avoids repeated String
+                        // concatenation; an immutable snapshot is taken below for
+                        // this provider chunk's UI publication.
                         turnTextSb.append(chunk.text)
                         // Append to the trailing text block — or open a new one if the last
                         // block isn't a text block (i.e. a tool call or thinking was in between).
                         // This preserves the chronological interleaving of text and tool calls
                         // across a single assistant turn. The block's `content` field stays
                         // immutable String — we keep a parallel StringBuilder for the active
-                        // block and materialise via .toString() only on flush.
+                        // block and materialise it for each published provider
+                        // chunk.
                         val lastIdx = allToolBlocks.lastIndex
                         val monolithic = currentProvider.streamTextIsMonolithic
-                        val activeSb = if (monolithic && turnTextBlockIdx >= 0 && currentTextBlockSb != null) {
+                        if (monolithic && turnTextBlockIdx >= 0 && currentTextBlockSb != null) {
                             // [T-android-tool-splits-reply-fix] Chat Completions
                             // content is ONE string per response — a content
                             // delta arriving after tool_calls deltas (qwen
@@ -8129,10 +8272,8 @@ class ChatViewModel(
                                 )
                             }
                             currentTextBlockSb!!.append(chunk.text)
-                            currentTextBlockSb!!
                         } else if (!monolithic && lastIdx >= 0 && allToolBlocks[lastIdx].kind == "text" && currentTextBlockSb != null) {
                             currentTextBlockSb!!.append(chunk.text)
-                            currentTextBlockSb!!
                         } else {
                             // New text run — either first text after a tool_use/thinking
                             // break, or first text in this turn. Open a fresh block AND
@@ -8164,36 +8305,14 @@ class ChatViewModel(
                             } else {
                                 allToolBlocks.add(block)
                             }
-                            freshSb
                         }
-                        // T94 fix 2 + T256: tiered text-delta throttle. Mutate local
-                        // state every delta (above) so block boundaries stay correct
-                        // for ToolUseStart / ToolInputDelta which read allToolBlocks
-                        // directly. Only push to _messages when the length-aware gate
-                        // opens (or a newline lands during a short reply). Pending
-                        // text lives in `pendingChunkSb` so the stream-end final
-                        // flush at line ~3580 can drain it.
-                        pendingChunkSb.append(chunk.text)
-                        val len = turnTextSb.length
-                        val unflushed = len - lastFlushedLen
-                        val throttle = textDeltaThrottleMs(len)
-                        val newlineFlush = len < 5_000 && chunk.text.contains('\n') && unflushed >= 50
-                        val nowMs = System.currentTimeMillis()
-                        if (nowMs - lastUiUpdateMs >= throttle || newlineFlush) {
-                            lastUiUpdateMs = nowMs
-                            lastFlushedLen = len
-                            pendingChunkSb.setLength(0)
-                            // Materialise SB → String for both the active block's
-                            // content (so Compose sees an immutable snapshot) and
-                            // for the assistant message body. These are O(n) calls
-                            // but happen at throttled cadence, not per delta.
-                            // (activeSb === currentTextBlockSb by construction.)
-                            materializeActiveTextBlock()
-                            val turnSnap = turnTextSb.toString()
-                            withContext(Dispatchers.Main) {
-                                updateAssistantMessage(assistantId, accumulatedText + turnSnap, true, allToolBlocks)
-                            }
-                        }
+                        // Publish each provider chunk directly. The whole accepted
+                        // chunk is accumulated and published in this same short Main
+                        // section, so normal end, Stop and errors have no pending
+                        // text buffer whose tail could be lost.
+                        materializeActiveTextBlock()
+                        val turnSnap = turnTextSb.toString()
+                        updateAssistantMessage(assistantId, accumulatedText + turnSnap, true, allToolBlocks)
                     }
                     is LLMStreamChunk.ToolUseStart -> {
                         // [T-dedupe-toolcallid] Rewrite duplicate id ASAP — the
@@ -8207,23 +8326,10 @@ class ChatViewModel(
                         if (thinkIdx >= 0 && allToolBlocks[thinkIdx].toolStatus != ToolBlockStatus.SUCCESS) {
                             allToolBlocks[thinkIdx] = allToolBlocks[thinkIdx].copy(toolStatus = ToolBlockStatus.SUCCESS)
                         }
-                        // T154: when the last few text deltas landed inside the 50ms throttle
-                        // window, the UI hadn't yet been pushed with the trailing text — and
-                        // adding the tool_use block before that push freezes the preceding
-                        // text fragment in StreamingMarkdownText (its `messageIsStreaming`
-                        // flag flips off the next layout pass) with chars chopped off the
-                        // end. Mirror iOS AnthropicAgentProvider.swift Step 1 / Step 2:
-                        // first push the latest accumulated text *unthrottled* so the text
-                        // block freezes at its complete value, yield to let Compose render
-                        // it, then add the tool_use block in a separate transaction. The
-                        // pendingChunkText/lastUiUpdateMs reset mirrors the throttle path
-                        // so the next text delta doesn't try to flush stale state.
-                        if (turnTextSb.isNotEmpty() && pendingChunkSb.isNotEmpty()) {
-                            pendingChunkSb.setLength(0)
-                            lastUiUpdateMs = System.currentTimeMillis()
-                            lastFlushedLen = turnTextSb.length
-                            // T307: pre-tool-use flush also materialises the
-                            // active text block + a turn-text snapshot.
+                        // Text chunks are already published directly, but ordered
+                        // providers still need the next post-tool text delta to open
+                        // a fresh text block.
+                        if (turnTextSb.isNotEmpty()) {
                             materializeActiveTextBlock()
                             // [T-android-tool-splits-reply-fix] Ordered mode:
                             // the tool block breaks the text run, so the next
@@ -8234,11 +8340,6 @@ class ChatViewModel(
                             if (!currentProvider.streamTextIsMonolithic) {
                                 currentTextBlockSb = null
                             }
-                            val turnSnap = turnTextSb.toString()
-                            withContext(Dispatchers.Main) {
-                                updateAssistantMessage(assistantId, accumulatedText + turnSnap, true, allToolBlocks)
-                            }
-                            yield()
                         }
                         // T256 tier 2: force the next ToolInputDelta to flush
                         // immediately by zeroing both gate timestamps. iOS does the
@@ -8399,26 +8500,6 @@ class ChatViewModel(
                     }
                 }
                     }  // end collect
-                    // T94 fix 2: flush any text that landed in the throttle
-                    // window after the last UI tick. The retry-rollback /
-                    // turn-finalize paths below assume _messages reflects all
-                    // accumulated text-deltas, so we must not leave the last
-                    // 0-50ms worth on the floor.
-                    if (pendingChunkSb.isNotEmpty()) {
-                        pendingChunkSb.setLength(0)
-                        // T307: also flush the active text block's pending
-                        // tail and snapshot turnText.
-                        materializeActiveTextBlock()
-                        val turnSnap = turnTextSb.toString()
-                        withContext(Dispatchers.Main) {
-                            updateAssistantMessage(assistantId, accumulatedText + turnSnap, true, allToolBlocks)
-                        }
-                    }
-                    // T256: reset throttle bookkeeping for the next turn so the
-                    // first delta of the next assistant message fires immediately
-                    // rather than coalescing against this turn's stale baseline.
-                    lastFlushedLen = 0
-                    lastUiUpdateMs = 0L
                     lastFileToolInputMs = 0L
                     lastOtherToolInputMs = 0L
                     collectDone = true
@@ -8505,13 +8586,6 @@ class ChatViewModel(
                         turnThinking.clear()
                         toolCalls.clear()
                         toolCallSignatures.clear()  // [T-android-gemini3-thoughtsig / #179]
-                        // T94 fix 2 + T256: throttle bookkeeping is per-stream
-                        // attempt; reset alongside the partial-block rollback so
-                        // the next attempt's first delta fires through immediately
-                        // rather than coalescing against stale baselines.
-                        pendingChunkSb.setLength(0)
-                        lastUiUpdateMs = 0L
-                        lastFlushedLen = 0
                         lastFileToolInputMs = 0L
                         lastOtherToolInputMs = 0L
                         continue  // retry on same provider
@@ -8704,7 +8778,17 @@ class ChatViewModel(
                 }
                 val turnParts = buildTurnParts(allToolBlocks, turnStartBlockIndex, toolInputMap)
                 val blockMeta = allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
-                persistAssistantTurn(turnParts, lastUsage, turnReasoningContent, blockMeta)
+                val assistantDbId = persistAssistantTurn(
+                    turnParts,
+                    lastUsage,
+                    turnReasoningContent,
+                    blockMeta,
+                )
+                if (assistantDbId != null) {
+                    withContext(Dispatchers.Main) {
+                        attachSourceDbId(assistantId, assistantDbId)
+                    }
+                }
                 // [T-error-persist-android] Empty-response hint: the model ended a
                 // turn (finish=stop/end_turn) with no visible text anywhere in the
                 // reply and no tool blocks — the user just sees a blank bubble.
@@ -9150,6 +9234,9 @@ class ChatViewModel(
                 if (lastIdx >= 0) {
                     agentHistory[lastIdx] = agentHistory[lastIdx].copy(dbMessageId = assistantDbId)
                 }
+                withContext(Dispatchers.Main) {
+                    attachSourceDbId(assistantId, assistantDbId)
+                }
             }
 
             // Persist tool results as user-role message (mirrors iOS)
@@ -9275,7 +9362,7 @@ class ChatViewModel(
         // on any message with a side-channel entry, so that orphan keeps the
         // "thinking" row alive forever. Defensively drop the entry here as the
         // last Main-thread write of this turn.
-        // [T-android-stream-flush-review] Cancel the trailing flush too, so it
+        // Cancel the reveal job too, so it
         // can't re-add this orphan entry after we drop it on the error path.
         clearStreamFlushState(assistantId)
         if (_streamingById.value.containsKey(assistantId)) {
@@ -9854,42 +9941,24 @@ class ChatViewModel(
         // persist, agent loop) see the canonical truth.
         if (isStreaming) {
             val toolBlocksImmutable = toolBlocks.toList()
-
-            // Provider events are target snapshots, not display frames. Keep
-            // only the newest target and let startStreamReveal expose it in
-            // small steps; otherwise one SSE event can paint two full lines.
             val st = streamFlushStates.getOrPut(id) {
-                StreamFlushState().also { it.lastFlushedLen = 0 }
-            }
-            val prev = _streamingById.value[id]
-            // [T-android-stream-flush-review] Structural change also covers an
-            // in-place tool-block STATUS flip (running → success), not just a
-            // count change — otherwise a spinner→checkmark could lag up to one
-            // throttle tier. Compare a cheap (kind,status) fingerprint.
-            val toolStatusChanged = prev != null &&
-                prev.toolBlocks.size == toolBlocksImmutable.size &&
-                toolBlocksImmutable.indices.any { i ->
-                    prev.toolBlocks[i].toolStatus != toolBlocksImmutable[i].toolStatus
-                }
-            val structuralChange = prev == null ||
-                prev.toolBlocks.size != toolBlocksImmutable.size ||
-                prev.isAwaitingModelResponse != isAwaitingModelResponse ||
-                toolStatusChanged
-            st.pendingContent = content
-            st.pendingBlocks = toolBlocksImmutable
-            st.pendingAwaiting = isAwaitingModelResponse
-            if (structuralChange) {
-                val visible = prev?.content.orEmpty().take(content.length)
-                _streamingById.value = _streamingById.value + (
-                    id to StreamingDelta(
-                        content = visible,
-                        toolBlocks = toolBlocksImmutable,
-                        isAwaitingModelResponse = isAwaitingModelResponse,
-                    )
+                StreamFlushState(
+                    latestContent = content,
+                    latestBlocks = toolBlocksImmutable,
+                    latestAwaiting = isAwaitingModelResponse,
                 )
-                st.lastFlushedLen = visible.length
             }
-            startStreamReveal(id, st)
+            st.latestContent = content
+            st.latestBlocks = toolBlocksImmutable
+            st.latestAwaiting = isAwaitingModelResponse
+            val next = StreamingDelta(
+                content = content,
+                toolBlocks = toolBlocksImmutable,
+                isAwaitingModelResponse = isAwaitingModelResponse,
+            )
+            if (_streamingById.value[id] != next) {
+                _streamingById.value = _streamingById.value + (id to next)
+            }
             // [T-android-timeout-while-running] If a transient banner
             // (`message.error`) is still on the canonical assistant message
             // when a fresh streaming event arrives, the banner is stale —
@@ -9921,10 +9990,8 @@ class ChatViewModel(
             }
             return
         }
-        // Stream end syncs the complete canonical message immediately for
-        // persistence/history, while the side-channel finishes its paced
-        // reveal. Removing the overlay early caused the final paragraph to
-        // jump onto screen in one frame.
+        // Stream end publishes the complete canonical snapshot immediately.
+        clearStreamFlushState(id)
         val current = _messages.value
         val idx = current.indexOfLast { it.id == id }
         if (idx < 0) {
@@ -9942,16 +10009,7 @@ class ChatViewModel(
             isAwaitingModelResponse = isAwaitingModelResponse,
         )
         _messages.value = updated
-        val st = streamFlushStates[id]
-        val visibleLength = _streamingById.value[id]?.content?.length ?: content.length
-        if (st != null && visibleLength < content.length) {
-            st.pendingContent = content
-            st.pendingBlocks = toolBlocks.toList()
-            st.pendingAwaiting = isAwaitingModelResponse
-            st.finishAfterDrain = true
-            startStreamReveal(id, st)
-        } else {
-            clearStreamFlushState(id)
+        if (_streamingById.value.containsKey(id)) {
             _streamingById.value = _streamingById.value - id
         }
     }
@@ -9963,7 +10021,7 @@ class ChatViewModel(
      * snapshots) without forcing the render layer to consult the delta map.
      */
     internal fun effectiveContent(id: String): String? {
-        streamFlushStates[id]?.pendingContent?.let { return it }
+        streamFlushStates[id]?.latestContent?.let { return it }
         val delta = _streamingById.value[id]
         if (delta != null) return delta.content
         return _messages.value.firstOrNull { it.id == id }?.content
@@ -9977,8 +10035,12 @@ class ChatViewModel(
      * [updateAssistantMessage] call had isStreaming=true.
      */
     private fun flushStreamingDelta(id: String) {
-        val delta = _streamingById.value[id] ?: return
-        val completeContent = streamFlushStates[id]?.pendingContent ?: delta.content
+        val state = streamFlushStates[id]
+        val delta = _streamingById.value[id]
+        if (state == null && delta == null) return
+        val completeContent = state?.latestContent ?: delta?.content ?: return
+        val completeBlocks = state?.latestBlocks ?: delta?.toolBlocks.orEmpty()
+        val completeAwaiting = state?.latestAwaiting ?: delta?.isAwaitingModelResponse ?: false
         val current = _messages.value
         val idx = current.indexOfLast { it.id == id }
         if (idx >= 0) {
@@ -9986,41 +10048,60 @@ class ChatViewModel(
             updated[idx] = current[idx].copy(
                 content = completeContent,
                 isStreaming = false,
-                toolBlocks = delta.toolBlocks,
-                isAwaitingModelResponse = delta.isAwaitingModelResponse,
+                toolBlocks = completeBlocks,
+                isAwaitingModelResponse = completeAwaiting,
             )
             _messages.value = updated
         }
-        // [T-android-stream-flush-review] Cancel the pending trailing flush
-        // BEFORE clearing the side channel — otherwise its viewModelScope
-        // coroutine (not cancelled by streamJob.cancel) fires later and
-        // re-adds the orphan side-channel entry, reviving a stale "thinking"
-        // row after the turn was stopped/drained.
         clearStreamFlushState(id)
         _streamingById.value = _streamingById.value - id
     }
 
     /** Drain ALL outstanding streaming deltas (called on global resets). */
     private fun flushAllStreamingDeltas() {
-        val completeTargets = streamFlushStates.mapValues { it.value.pendingContent }
+        val completeTargets = streamFlushStates.mapValues { (_, state) ->
+            StreamingDelta(
+                content = state.latestContent,
+                toolBlocks = state.latestBlocks,
+                isAwaitingModelResponse = state.latestAwaiting,
+            )
+        }
         val pending = _streamingById.value
         clearAllStreamFlushStates()
-        if (pending.isEmpty()) return
+        val targetIds = completeTargets.keys + pending.keys
+        if (targetIds.isEmpty()) {
+            _streamingById.value = emptyMap()
+            return
+        }
         val current = _messages.value.toMutableList()
         var changed = false
-        for ((id, delta) in pending) {
+        for (id in targetIds) {
             val idx = current.indexOfLast { it.id == id }
             if (idx < 0) continue
+            val complete = completeTargets[id] ?: pending[id] ?: continue
             current[idx] = current[idx].copy(
-                content = completeTargets[id] ?: delta.content,
+                content = complete.content,
                 isStreaming = false,
-                toolBlocks = delta.toolBlocks,
-                isAwaitingModelResponse = delta.isAwaitingModelResponse,
+                toolBlocks = complete.toolBlocks,
+                isAwaitingModelResponse = complete.isAwaitingModelResponse,
             )
             changed = true
         }
         if (changed) _messages.value = current
         _streamingById.value = emptyMap()
+    }
+
+    /**
+     * Run after every agent-loop entry point has completely unwound. A text
+     * chunk already accepted by the collector is published from a narrow
+     * NonCancellable Main section; this final drain covers the race where an
+     * eager Stop drain ran just before that publication. It is also the common
+     * exception/cancellation tail for send, retry, rerun, resume and queue drain.
+     */
+    private suspend fun drainStreamingSideChannelAfterLoop() {
+        withContext(NonCancellable + Dispatchers.Main) {
+            flushAllStreamingDeltas()
+        }
     }
 
     /**
@@ -10130,6 +10211,16 @@ class ChatViewModel(
             modelSnapshot = currentModelSnapshot(),
         )
         return entity.id
+    }
+
+    private fun attachSourceDbId(messageId: String, dbMessageId: String) {
+        _messages.value = _messages.value.map { message ->
+            if (message.id == messageId && dbMessageId !in message.sourceDbIds) {
+                message.copy(sourceDbIds = message.sourceDbIds + dbMessageId)
+            } else {
+                message
+            }
+        }
     }
 
     @Deprecated("Use persistAssistantTurn(parts, ...) for per-turn delta persistence")
@@ -11603,6 +11694,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                         setInlineError(e.message ?: "Unknown error")
                     } finally {
                         AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel streamJob FINALLY enter")
+                        drainStreamingSideChannelAfterLoop()
                         // [T-android-overlay-reply-status-34599] Surface
                         // the assistant's most recent reply text to the
                         // overlay BEFORE setInactive so the post-completion
@@ -11806,6 +11898,8 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         }
         _canResume.value = false
         _error.value = null
+        _messages.value.lastOrNull { it.role == "assistant" }
+            ?.let { invalidateAssistantTranslation(it) }
         // [T-error-persist-android] resume() follows finalizeAtTurnLimit's
         // setInlineError (which persisted an error sticker on the last assistant
         // row). Clear it now so a successful resume doesn't merge-resurrect the
@@ -11886,6 +11980,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                         setInlineError(e.message ?: "Unknown error")
                     } finally {
                         AppLogger.info(TAG_STREAM, "resume streamJob FINALLY enter")
+                        drainStreamingSideChannelAfterLoop()
                         // [T-android-overlay-reply-status-34599] Surface
                         // the assistant's most recent reply text to the
                         // overlay BEFORE setInactive so the post-completion
@@ -12059,6 +12154,8 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         // Filter out user messages that only contain toolResult parts (no visible text)
         return mapNotNull { entity ->
             var text = ""
+            val restoredTranslation = entity.translationText?.takeIf { it.isNotBlank() }
+            val restoredTranslationLanguage = entity.translationLanguage?.takeIf { it.isNotBlank() }
             val blocks = mutableListOf<AssistantBlock>()
             // T128: media attachments persisted under user messages as `mediaRef`
             // parts. Restored to file:// URIs (stable across app restarts) and
@@ -12235,6 +12332,8 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 attachmentNames = restoredImageNames + restoredFileNames,
                 attachmentUris = restoredAttachmentUris,
                 toolBlocks = blocks,
+                translation = restoredTranslation,
+                translationLanguage = restoredTranslationLanguage,
                 sourceDbIds = listOf(entity.id),
                 // [T-error-persist-android] Restore the persisted terminal error
                 // so the inline error banner + Retry button survive a reload.
@@ -12276,6 +12375,8 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                         // an assistant row that gets folded into a later
                         // assistant turn).
                         sourceDbIds = prev.sourceDbIds + msg.sourceDbIds,
+                        translation = msg.translation ?: prev.translation,
+                        translationLanguage = msg.translationLanguage ?: prev.translationLanguage,
                         // [T-error-persist-android] The error sticker is written
                         // to the LAST assistant row of the turn, so the later row
                         // (`msg`) wins; fall back to `prev` if only it carried one.

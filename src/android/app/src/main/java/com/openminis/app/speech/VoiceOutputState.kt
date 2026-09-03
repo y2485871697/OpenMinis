@@ -102,8 +102,9 @@ object VoiceOutputState {
     }
 
     /**
-     * [T-android-tts-player-registry] Stack of live players, most recent last.
-     * [activePlayer] is the top — the one the capsule's mute/close/speed act on.
+     * [T-android-tts-player-registry] Registry of live players, most recently
+     * promoted last. [activePlayer] is the player currently producing output —
+     * the one the capsule's mute/close/speed actions operate on.
      *
      * This was a single last-writer-wins slot, which broke as soon as TWO
      * players existed (the reply channel in ChatScreen, and the selection
@@ -115,28 +116,81 @@ object VoiceOutputState {
      *    than back to the reply player, so the capsule permanently lost its
      *    handle even after the thief was gone.
      *
-     * A stack fixes both: whoever is most recent gets the controls, and
-     * dismissing them restores the previous owner. Deregistration is by
-     * identity so a mid-stack player leaving doesn't disturb the rest.
+     * Construction only registers; enqueue promotes. When that player drains,
+     * ownership returns to the most recent registered player that is still
+     * speaking, paused, or synthesizing.
      */
     private val players = ArrayDeque<ReadAloudPlayer>()
 
-    val activePlayer: ReadAloudPlayer?
-        get() = synchronized(players) { players.lastOrNull() }
+    private val _activePlayer = MutableStateFlow<ReadAloudPlayer?>(null)
+    val activePlayer: StateFlow<ReadAloudPlayer?> = _activePlayer.asStateFlow()
 
-    fun registerPlayer(player: ReadAloudPlayer) = synchronized(players) {
-        players.remove(player)
-        players.addLast(player)
+    fun registerPlayer(player: ReadAloudPlayer) {
+        synchronized(players) {
+            players.remove(player)
+            players.addLast(player)
+        }
     }
 
-    fun unregisterPlayer(player: ReadAloudPlayer) = synchronized(players) {
-        players.remove(player)
+    fun promotePlayer(player: ReadAloudPlayer) {
+        val changed = synchronized(players) {
+            val wasDifferent = _activePlayer.value !== player
+            players.remove(player)
+            players.addLast(player)
+            _activePlayer.value = player
+            wasDifferent
+        }
+        if (changed) syncGlobalMirrors(player)
+    }
+
+    fun unregisterPlayer(player: ReadAloudPlayer) {
+        var replacement: ReadAloudPlayer? = null
+        val changed = synchronized(players) {
+            val wasActive = _activePlayer.value === player
+            players.remove(player)
+            if (wasActive) {
+                replacement = mostRecentActivePlayer(excluding = player)
+                _activePlayer.value = replacement
+            }
+            wasActive
+        }
+        if (changed) syncGlobalMirrors(replacement)
+    }
+
+    /** Hand the capsule back when its owner drains while another player is
+     * still speaking/paused/synthesizing. Idle registered players are skipped. */
+    fun playerBecameIdle(player: ReadAloudPlayer) {
+        var replacement: ReadAloudPlayer? = null
+        val changed = synchronized(players) {
+            if (_activePlayer.value !== player || player.hasActiveOutput()) {
+                false
+            } else {
+                replacement = mostRecentActivePlayer(excluding = player)
+                _activePlayer.value = replacement
+                true
+            }
+        }
+        if (changed) syncGlobalMirrors(replacement)
+    }
+
+    private fun mostRecentActivePlayer(excluding: ReadAloudPlayer): ReadAloudPlayer? =
+        players.toList().asReversed().firstOrNull {
+            it !== excluding && it.hasActiveOutput()
+        }
+
+    private fun syncGlobalMirrors(player: ReadAloudPlayer?) {
+        synchronized(players) {
+            if (_activePlayer.value !== player) return
+            isSpeaking.value = player?.isSpeaking?.value == true
+            isSynthesizing.value = player?.isSynthesizing?.value == true
+            activeModelLabel.value = player?.activeModelLabel?.value
+        }
     }
 
     /** True when [player] currently owns the capsule — gates the live-state
      *  mirror writes so a background player can't flicker the UI. */
     fun isActivePlayer(player: ReadAloudPlayer): Boolean =
-        synchronized(players) { players.lastOrNull() === player }
+        synchronized(players) { _activePlayer.value === player }
 
     /** Effective gate for producing reply audio: enabled AND not muted. */
     val canPlay: Boolean get() = _isEnabled.value && !_isMuted.value
@@ -209,7 +263,8 @@ object VoiceOutputState {
             // Off → stop whatever is being read, drop the queue, clear the
             // temporary mute (meaningless once fully off; a fresh enable
             // should start un-muted). Mirrors iOS isEnabled.didSet.
-            activePlayer?.stop()
+            val live = synchronized(players) { players.toList() }
+            live.forEach { runCatching { it.stop() } }
             setMuted(false)
         }
     }
@@ -219,7 +274,10 @@ object VoiceOutputState {
         _isMuted.value = value
         prefs?.edit()?.putBoolean(KEY_MUTED, value)?.apply()
         // Mute silences the CURRENT playback too, not just future utterances.
-        if (value) activePlayer?.stop()
+        if (value) {
+            val live = synchronized(players) { players.toList() }
+            live.forEach { runCatching { it.stop() } }
+        }
     }
 
     fun setSpeed(value: Float) {

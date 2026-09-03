@@ -132,6 +132,11 @@ data class ChatMessage(
     // Mirrors iOS ChatMessage.isQueued / queuedPromptId.
     val isQueued: Boolean = false,
     val queuedPromptId: String? = null,
+    // App-owned display metadata persisted in nullable message-table columns.
+    // Providers never receive it; it lets a translation travel with the reply
+    // across navigation, process restarts, export and backup/restore.
+    val translation: String? = null,
+    val translationLanguage: String? = null,
     // Set to true when this message belongs to a range that has been folded
     // into a compact summary marker. Mirrors iOS ChatMessage.isCompactedHistory:
     // the message stays in the UI, but renders at reduced opacity so the user

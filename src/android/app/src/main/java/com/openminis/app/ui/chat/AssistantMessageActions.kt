@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AccountTree
@@ -50,7 +52,26 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openminis.app.R
-import java.util.Locale
+
+private data class TranslationLanguageOption(
+    val tag: String,
+    val displayName: String,
+)
+
+private val translationLanguageOptions = listOf(
+    TranslationLanguageOption("zh-Hans", "简体中文"),
+    TranslationLanguageOption("en", "English"),
+    TranslationLanguageOption("zh-Hant", "繁體中文"),
+    TranslationLanguageOption("ja", "日本語"),
+    TranslationLanguageOption("ko", "한국어"),
+    TranslationLanguageOption("fr", "Français"),
+    TranslationLanguageOption("de", "Deutsch"),
+    TranslationLanguageOption("es", "Español"),
+    TranslationLanguageOption("it", "Italiano"),
+)
+
+private fun translationLanguageLabel(tag: String): String =
+    translationLanguageOptions.firstOrNull { it.tag == tag }?.displayName ?: tag
 
 /** RikkaHub-style actions shown once under every completed assistant reply. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -58,10 +79,12 @@ import java.util.Locale
 internal fun AssistantMessageActions(
     messageMarkdown: String,
     translation: String?,
+    translationLanguage: String?,
     isTranslating: Boolean,
     onRegenerate: (() -> Unit)?,
     onReadAloud: () -> Unit,
     onTranslate: (String) -> Unit,
+    onClearTranslation: () -> Unit,
     onEdit: (String) -> Unit,
     onCreateBranch: () -> Unit,
     onDelete: () -> Unit,
@@ -69,10 +92,35 @@ internal fun AssistantMessageActions(
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     var showMore by remember { mutableStateOf(false) }
+    var showLanguagePicker by remember { mutableStateOf(false) }
     var showEdit by remember { mutableStateOf(false) }
     var editText by remember(messageMarkdown) { mutableStateOf(messageMarkdown) }
 
     Column(modifier = Modifier.fillMaxWidth()) {
+        if (!translation.isNullOrBlank()) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = buildString {
+                            append(context.getString(R.string.message_translation_label))
+                            translationLanguage?.takeIf { it.isNotBlank() }?.let {
+                                append(" · ")
+                                append(translationLanguageLabel(it))
+                            }
+                        },
+                        color = MaterialTheme.colorScheme.primary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    MarkdownBlock(rawText = translation, isStreaming = false)
+                }
+            }
+        }
+
         Row(
             modifier = Modifier.padding(top = 2.dp, bottom = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -96,10 +144,7 @@ internal fun AssistantMessageActions(
                 icon = Icons.Default.Language,
                 description = context.getString(R.string.message_action_translate),
                 enabled = !isTranslating,
-            ) {
-                val target = if (Locale.getDefault().language.startsWith("zh")) "English" else "Simplified Chinese"
-                onTranslate(target)
-            }
+            ) { showLanguagePicker = true }
             MessageActionButton(
                 icon = Icons.Default.MoreVert,
                 description = context.getString(R.string.message_action_more),
@@ -108,22 +153,38 @@ internal fun AssistantMessageActions(
                 CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.5.dp)
             }
         }
+    }
 
-        if (!translation.isNullOrBlank()) {
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                verticalAlignment = Alignment.Top,
+    if (showLanguagePicker) {
+        ModalBottomSheet(onDismissRequest = { showLanguagePicker = false }) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = context.getString(R.string.message_translation_label),
-                        color = MaterialTheme.colorScheme.primary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                    )
-                    MarkdownBlock(rawText = translation, isStreaming = false)
+                Text(
+                    text = context.getString(R.string.message_action_translate),
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
+                )
+                translationLanguageOptions.forEach { language ->
+                    MessageMoreAction(Icons.Default.Language, language.displayName) {
+                        showLanguagePicker = false
+                        onTranslate(language.tag)
+                    }
                 }
+                if (!translation.isNullOrBlank()) {
+                    MessageMoreAction(
+                        Icons.Default.Close,
+                        context.getString(R.string.message_translation_clear),
+                    ) {
+                        showLanguagePicker = false
+                        onClearTranslation()
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
             }
         }
     }

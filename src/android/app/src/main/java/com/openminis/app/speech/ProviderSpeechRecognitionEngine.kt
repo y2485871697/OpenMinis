@@ -5,6 +5,8 @@ import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import com.openminis.app.MinisApp
 import com.openminis.app.provider.voice.VoiceInputRequest
@@ -19,6 +21,7 @@ import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.log10
 import kotlin.math.max
 import kotlin.math.sqrt
@@ -83,12 +86,28 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var captureJob: Job? = null
     private var transcribeJob: Job? = null
-    /** [T-android-vad-merge-segments] Sub-threshold segments held for merge. */
-    private val pendingSegments = mutableListOf<ByteArray>()
-    private var holdFlushJob: Job? = null
     private val recording = AtomicBoolean(false)
     private val cancelled = AtomicBoolean(false)
+    private val callbackGeneration = AtomicLong(0L)
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var degraded = false
+
+    private fun isCurrent(generation: Long): Boolean =
+        callbackGeneration.get() == generation && !cancelled.get()
+
+    /** SpeechRecognitionManager mutates Compose-facing state, so every engine
+     * callback is delivered on main. The generation check also drops callbacks
+     * already queued when a cancellation or replacement session wins the race. */
+    private fun dispatchListener(
+        generation: Long?,
+        listener: SpeechRecognitionEngine.Listener,
+        callback: SpeechRecognitionEngine.Listener.() -> Unit,
+    ) {
+        val task = Runnable {
+            if (generation == null || isCurrent(generation)) callback(listener)
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) task.run() else mainHandler.post(task)
+    }
 
     /**
      * [T-android-vad] Live Silero detector for the segmented path, null when
@@ -96,6 +115,25 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
      */
     @Volatile
     private var detector: VoiceActivityDetector? = null
+
+    /** Mutable state for one VAD capture. Every access is guarded by [lock]. */
+    private class VadCaptureSession(
+        val generation: Long,
+        val locale: Locale,
+        val repo: com.openminis.app.data.repository.ProviderRepository,
+        val candidates: List<Pair<com.openminis.app.data.model.ProviderInstance, com.openminis.app.data.model.ModelEntry>>,
+        val listener: SpeechRecognitionEngine.Listener,
+    ) {
+        val lock = Any()
+        val pendingSegments = mutableListOf<ByteArray>()
+        val rawPcm = ByteArrayOutputStream()
+        var holdFlushJob: Job? = null
+        var terminalClaimed = false
+        var sawVoice = false
+    }
+
+    @Volatile
+    private var vadSession: VadCaptureSession? = null
 
     /**
      * Whether to segment with Silero instead of recording until the user taps
@@ -147,22 +185,25 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
             loadBalanceSeed = kotlin.random.Random.nextInt(Int.MAX_VALUE),
         ).orEmpty()
         if (repo == null || candidates.isEmpty()) {
-            listener.onError(
-                RecognitionError.OEM_NO_SERVICE,
-                "No provider voice-input model configured. Add an ASR model to the Voice Input group.",
-            )
+            dispatchListener(null, listener) {
+                onError(
+                    RecognitionError.OEM_NO_SERVICE,
+                    "No provider voice-input model configured. Add an ASR model to the Voice Input group.",
+                )
+            }
             return
         }
         if (recording.getAndSet(true)) {
-            listener.onError(RecognitionError.RECOGNIZER_BUSY, "A capture is already in flight.")
+            dispatchListener(null, listener) {
+                onError(RecognitionError.RECOGNIZER_BUSY, "A capture is already in flight.")
+            }
             return
         }
+        val generation = callbackGeneration.incrementAndGet()
         cancelled.set(false)
-        // [T-android-vad-merge-segments] A fresh session must not inherit audio
-        // held from the previous one.
-        pendingSegments.clear()
-        holdFlushJob?.cancel()
-        holdFlushJob = null
+        // A generation owns all VAD buffers and delayed work. Any stale state
+        // is unreachable after this point and its callbacks are generation-gated.
+        vadSession = null
 
         // [T-android-vad] VAD-segmented path. Before this, the provider engine
         // had NO endpointing at all: it recorded until the user tapped stop or
@@ -170,7 +211,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
         // every utterance. Silero now closes a segment after ~5 s of silence
         // and the mic stops, exactly as on iOS.
         if (useVad) {
-            startVadCapture(locale, repo, candidates, listener)
+            startVadCapture(locale, repo, candidates, listener, generation)
             return
         }
 
@@ -179,8 +220,10 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                 SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
             )
             if (minBuf <= 0) {
-                recording.set(false)
-                listener.onError(RecognitionError.AUDIO_ERROR, "AudioRecord unsupported buffer size.")
+                if (isCurrent(generation)) recording.set(false)
+                dispatchListener(generation, listener) {
+                    onError(RecognitionError.AUDIO_ERROR, "AudioRecord unsupported buffer size.")
+                }
                 return@launch
             }
             val recorder = try {
@@ -192,14 +235,18 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                     minBuf * 4,
                 )
             } catch (e: Exception) {
-                recording.set(false)
-                listener.onError(RecognitionError.AUDIO_ERROR, "AudioRecord init failed: ${e.message}")
+                if (isCurrent(generation)) recording.set(false)
+                dispatchListener(generation, listener) {
+                    onError(RecognitionError.AUDIO_ERROR, "AudioRecord init failed: ${e.message}")
+                }
                 return@launch
             }
             if (recorder.state != AudioRecord.STATE_INITIALIZED) {
                 recorder.release()
-                recording.set(false)
-                listener.onError(RecognitionError.AUDIO_ERROR, "AudioRecord not initialized.")
+                if (isCurrent(generation)) recording.set(false)
+                dispatchListener(generation, listener) {
+                    onError(RecognitionError.AUDIO_ERROR, "AudioRecord not initialized.")
+                }
                 return@launch
             }
 
@@ -208,27 +255,32 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
             val maxBytes = SAMPLE_RATE * 2 * MAX_RECORD_SECONDS
             try {
                 recorder.startRecording()
-                listener.onReadyForSpeech()
+                dispatchListener(generation, listener) { onReadyForSpeech() }
                 while (recording.get() && pcm.size() < maxBytes) {
                     val n = recorder.read(buf, 0, buf.size)
                     if (n <= 0) continue
                     pcm.write(buf, 0, n)
-                    listener.onRmsDb(rmsDb(buf, n))
+                    dispatchListener(generation, listener) { onRmsDb(rmsDb(buf, n)) }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "capture failed: ${e.message}", e)
-                recording.set(false)
-                listener.onError(RecognitionError.AUDIO_ERROR, e.message)
+                if (isCurrent(generation)) recording.set(false)
+                dispatchListener(generation, listener) {
+                    onError(RecognitionError.AUDIO_ERROR, e.message)
+                }
                 return@launch
             } finally {
                 runCatching { recorder.stop() }
                 recorder.release()
             }
 
-            if (cancelled.get()) return@launch
+            if (!isCurrent(generation)) return@launch
+            recording.set(false)
             val audio = pcm.toByteArray()
             if (audio.isEmpty()) {
-                listener.onError(RecognitionError.NO_MATCH, "No audio captured.")
+                dispatchListener(generation, listener) {
+                    onError(RecognitionError.NO_MATCH, "No audio captured.")
+                }
                 return@launch
             }
 
@@ -249,7 +301,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                     ?: candidates
                 var lastError: Exception? = null
                 for ((instance, entry) in ordered) {
-                    if (cancelled.get()) return@launch
+                    if (!isCurrent(generation)) return@launch
                     val provider = VoiceProviderFactory.make(instance, repo.loadApiKey(instance.id))
                     if (provider == null) {
                         Log.w(TAG, "candidate ${instance.label} cannot serve voice input — skipping")
@@ -264,16 +316,18 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                                 resolvedModel = entry.model,
                             ),
                         )
-                        if (cancelled.get()) return@launch
+                        if (!isCurrent(generation)) return@launch
                         stickyEntryId = entry.id
                         val text = response.text.trim()
                         if (text.isEmpty()) {
                             // A successful round-trip that heard nothing is a
                             // semantic no-match, not a provider failure — do
                             // NOT advance the chain for it.
-                            listener.onError(RecognitionError.NO_MATCH, "Empty transcription.")
+                            dispatchListener(generation, listener) {
+                                onError(RecognitionError.NO_MATCH, "Empty transcription.")
+                            }
                         } else {
-                            listener.onFinal(text)
+                            dispatchListener(generation, listener) { onFinal(text) }
                         }
                         return@launch
                     } catch (e: kotlinx.coroutines.CancellationException) {
@@ -283,14 +337,16 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                         lastError = e
                     }
                 }
-                if (!cancelled.get()) {
+                if (isCurrent(generation)) {
                     val e = lastError
                     val kind = when {
                         e is VoiceProviderException.Auth -> RecognitionError.PERMISSION_DENIED
                         e is java.io.IOException -> RecognitionError.NETWORK
                         else -> RecognitionError.UNKNOWN
                     }
-                    listener.onError(kind, e?.message ?: "All voice-input candidates failed.")
+                    dispatchListener(generation, listener) {
+                        onError(kind, e?.message ?: "All voice-input candidates failed.")
+                    }
                 }
             }
         }
@@ -309,11 +365,21 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
         repo: com.openminis.app.data.repository.ProviderRepository,
         candidates: List<Pair<com.openminis.app.data.model.ProviderInstance, com.openminis.app.data.model.ModelEntry>>,
         listener: SpeechRecognitionEngine.Listener,
+        generation: Long,
     ) {
+        val session = VadCaptureSession(generation, locale, repo, candidates, listener)
+        vadSession = session
         val det = VoiceActivityDetector(
             appContext,
             object : VoiceActivityListener {
                 override fun onVoiceStart() {
+                    if (!isCurrent(generation)) return
+                    val staleFlush = synchronized(session.lock) {
+                        if (session.terminalClaimed) return
+                        session.sawVoice = true
+                        session.holdFlushJob.also { session.holdFlushJob = null }
+                    }
+                    staleFlush?.cancel()
                     Log.i(TAG, "[vad] speech start")
                 }
 
@@ -321,11 +387,11 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                     // Map the detector's perceptual [0,1] back onto the [0,12]
                     // dB-ish scale SpeechRecognitionManager normalizes from, so
                     // both engines drive the waveform identically.
-                    listener.onRmsDb(level * 12f)
+                    dispatchListener(generation, listener) { onRmsDb(level * 12f) }
                 }
 
                 override fun onVoiceEnd(wav: ByteArray, reason: SegmentEndReason, spokenSeconds: Float) {
-                    if (cancelled.get()) return
+                    if (!isCurrent(generation)) return
 
                     // [T-android-vad-merge-segments] ACCUMULATE, don't discard.
                     //
@@ -338,8 +404,11 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                     // The 2 s floor still does its job (one isolated cough is
                     // still one short segment), it just applies to the whole
                     // held utterance now.
-                    pendingSegments.add(wav)
-                    val heldSeconds = WavSegmentMerger.totalSeconds(pendingSegments)
+                    val heldSeconds = synchronized(session.lock) {
+                        if (session.terminalClaimed) return
+                        session.pendingSegments.add(wav)
+                        WavSegmentMerger.totalSeconds(session.pendingSegments)
+                    }
 
                     if (reason == SegmentEndReason.SILENCE_DETECTED &&
                         heldSeconds < MIN_SEGMENT_SECONDS
@@ -353,57 +422,84 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                         // Force-flush after HOLD_FLUSH_MS of real silence so a
                         // genuine cough still resolves (to a "too short" toast)
                         // instead of leaving the mic on indefinitely.
-                        holdFlushJob?.cancel()
-                        holdFlushJob = scope.launch {
+                        val flushJob = scope.launch {
                             kotlinx.coroutines.delay(HOLD_FLUSH_MS)
-                            if (cancelled.get()) return@launch
-                            val held = WavSegmentMerger.totalSeconds(pendingSegments)
+                            if (!isCurrent(generation)) return@launch
+                            val held = synchronized(session.lock) {
+                                if (session.terminalClaimed) return@launch
+                                WavSegmentMerger.totalSeconds(session.pendingSegments)
+                            }
                             Log.i(TAG, "[vad] hold expired at ${"%.2f".format(held)}s — settling")
+                            if (!claimVadSessionWithoutAudio(session)) return@launch
+                            detachVadSession(session)
                             stopVad()
                             if (held > TOO_SHORT_TOAST_FLOOR) {
-                                listener.onError(
-                                    RecognitionError.NO_MATCH,
-                                    "Too short — hold the mic and speak.",
-                                )
+                                dispatchListener(generation, listener) {
+                                    onError(
+                                        RecognitionError.NO_MATCH,
+                                        "Too short — hold the mic and speak.",
+                                    )
+                                }
+                            } else {
+                                // Silent/accidental taps still need a terminal
+                                // callback so the manager can leave FINISHING.
+                                dispatchListener(generation, listener) { onFinal("") }
                             }
-                            pendingSegments.clear()
                         }
+                        val previous = synchronized(session.lock) {
+                            if (session.terminalClaimed) {
+                                flushJob.cancel()
+                                null
+                            } else {
+                                session.holdFlushJob.also { session.holdFlushJob = flushJob }
+                            }
+                        }
+                        previous?.cancel()
                         return
                     }
 
-                    holdFlushJob?.cancel()
-                    holdFlushJob = null
-                    val merged = WavSegmentMerger.merge(pendingSegments) ?: wav
-                    if (pendingSegments.size > 1) {
+                    val (merged, segmentCount) = synchronized(session.lock) {
+                        if (session.terminalClaimed) return
+                        session.terminalClaimed = true
+                        session.holdFlushJob?.cancel()
+                        session.holdFlushJob = null
+                        val count = session.pendingSegments.size
+                        val audio = WavSegmentMerger.merge(session.pendingSegments) ?: wav
+                        session.pendingSegments.clear()
+                        session.rawPcm.reset()
+                        audio to count
+                    }
+                    if (segmentCount > 1) {
                         Log.i(
                             TAG,
-                            "[vad] merged ${pendingSegments.size} segments → " +
+                            "[vad] merged $segmentCount segments → " +
                                 "${"%.2f".format(heldSeconds)}s",
                         )
                     }
-                    pendingSegments.clear()
-
-                    if (reason == SegmentEndReason.SILENCE_DETECTED) {
-                        // Silence = the user stopped. Mic off, then transcribe.
-                        stopVad()
-                    }
-                    transcribeJob = scope.launch {
-                        transcribeSegment(merged, locale, repo, candidates, listener)
-                    }
+                    // One engine session has one terminal result. Stop capture
+                    // for both silence and a length cap before transcribing.
+                    detachVadSession(session)
+                    stopVad()
+                    launchVadTranscription(session, merged)
                 }
 
                 override fun onSessionLimit(limit: SessionLimit) {
-                    // Allowance exhausted, not a failure. The library has
-                    // already delivered any closed segment; nothing is pending
-                    // here, so just settle the mic.
-                    Log.i(TAG, "[vad] session limit $limit — stopping")
-                    stopVad()
+                    if (!isCurrent(generation)) return
+                    Log.i(TAG, "[vad] session limit $limit — finalising")
+                    finishVadSession(
+                        session,
+                        transcribeWithoutDetectedVoice = limit != SessionLimit.IDLE,
+                    )
                 }
 
                 override fun onCaptureError(message: String) {
+                    if (!isCurrent(generation)) return
+                    if (!claimVadSessionWithoutAudio(session)) return
+                    detachVadSession(session)
                     stopVad()
-                    recording.set(false)
-                    listener.onError(RecognitionError.AUDIO_ERROR, message)
+                    dispatchListener(generation, listener) {
+                        onError(RecognitionError.AUDIO_ERROR, message)
+                    }
                 }
             },
         ).also {
@@ -414,14 +510,100 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
             it.maxSegmentSeconds = CLOUD_MAX_SEGMENT_SECONDS
         }
 
+        // The VAD library cannot flush an in-progress segment on stop. Keep a
+        // raw copy so the user's stop tap and session limits can still submit
+        // exactly one complete take rather than stranding FINISHING forever.
+        det.rawAudioSink = sink@{ bytes, len ->
+            if (!isCurrent(generation)) return@sink
+            synchronized(session.lock) {
+                if (!session.terminalClaimed) session.rawPcm.write(bytes, 0, len)
+            }
+        }
+
+        detector = det
         val err = det.start()
         if (err != null) {
-            recording.set(false)
-            listener.onError(RecognitionError.AUDIO_ERROR, err)
+            val claimed = claimVadSessionWithoutAudio(session)
+            detachVadSession(session)
+            stopVad()
+            if (claimed) {
+                dispatchListener(generation, listener) {
+                    onError(RecognitionError.AUDIO_ERROR, err)
+                }
+            }
             return
         }
-        detector = det
-        listener.onReadyForSpeech()
+        if (!isCurrent(generation) || synchronized(session.lock) { session.terminalClaimed }) {
+            stopVad()
+            return
+        }
+        dispatchListener(generation, listener) { onReadyForSpeech() }
+    }
+
+    private fun detachVadSession(session: VadCaptureSession) {
+        if (vadSession === session) vadSession = null
+    }
+
+    /** Claim a VAD session for a non-transcribing terminal path. */
+    private fun claimVadSessionWithoutAudio(session: VadCaptureSession): Boolean =
+        synchronized(session.lock) {
+            if (session.terminalClaimed) {
+                false
+            } else {
+                session.terminalClaimed = true
+                session.holdFlushJob?.cancel()
+                session.holdFlushJob = null
+                session.pendingSegments.clear()
+                session.rawPcm.reset()
+                true
+            }
+        }
+
+    /** Finalise a manual stop/session limit from the raw capture fallback. */
+    private fun finishVadSession(
+        session: VadCaptureSession,
+        transcribeWithoutDetectedVoice: Boolean = true,
+    ) {
+        if (!isCurrent(session.generation)) return
+        val claimed = synchronized(session.lock) {
+            if (session.terminalClaimed) {
+                null
+            } else {
+                session.terminalClaimed = true
+                session.holdFlushJob?.cancel()
+                session.holdFlushJob = null
+                val value = session.rawPcm.toByteArray() to session.sawVoice
+                session.rawPcm.reset()
+                session.pendingSegments.clear()
+                value
+            }
+        } ?: return
+
+        detachVadSession(session)
+        stopVad()
+        if (!isCurrent(session.generation)) return
+
+        val (pcm, sawVoice) = claimed
+        if (pcm.isEmpty() || (!sawVoice && !transcribeWithoutDetectedVoice)) {
+            dispatchListener(session.generation, session.listener) { onFinal("") }
+            return
+        }
+        val wav = VoiceProvider.wrapPcm16InWav(pcm, VoiceActivityDetector.SAMPLE_RATE)
+        launchVadTranscription(session, wav)
+    }
+
+    private fun launchVadTranscription(session: VadCaptureSession, wav: ByteArray) {
+        if (!isCurrent(session.generation)) return
+        transcribeJob = scope.launch {
+            transcribeSegment(
+                wav,
+                session.locale,
+                session.repo,
+                session.candidates,
+                session.listener,
+                session.generation,
+            )
+        }
     }
 
     /** Transcribe one segment. Extracted so the VAD and legacy paths share it. */
@@ -431,6 +613,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
         repo: com.openminis.app.data.repository.ProviderRepository,
         candidates: List<Pair<com.openminis.app.data.model.ProviderInstance, com.openminis.app.data.model.ModelEntry>>,
         listener: SpeechRecognitionEngine.Listener,
+        generation: Long,
     ) {
         val ordered = stickyEntryId
             ?.let { sticky -> candidates.indexOfFirst { it.second.id == sticky } }
@@ -439,7 +622,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
             ?: candidates
         var lastError: Exception? = null
         for ((instance, entry) in ordered) {
-            if (cancelled.get()) return
+            if (!isCurrent(generation)) return
             val provider = VoiceProviderFactory.make(instance, repo.loadApiKey(instance.id))
             if (provider == null) {
                 Log.w(TAG, "candidate ${instance.label} cannot serve voice input — skipping")
@@ -454,13 +637,15 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                         resolvedModel = entry.model,
                     ),
                 )
-                if (cancelled.get()) return
+                if (!isCurrent(generation)) return
                 stickyEntryId = entry.id
                 val text = response.text.trim()
                 if (text.isEmpty()) {
-                    listener.onError(RecognitionError.NO_MATCH, "Empty transcription.")
+                    dispatchListener(generation, listener) {
+                        onError(RecognitionError.NO_MATCH, "Empty transcription.")
+                    }
                 } else {
-                    listener.onFinal(text)
+                    dispatchListener(generation, listener) { onFinal(text) }
                 }
                 return
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -470,19 +655,24 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                 lastError = e
             }
         }
-        if (!cancelled.get()) {
+        if (isCurrent(generation)) {
             val e = lastError
             val kind = when {
                 e is VoiceProviderException.Auth -> RecognitionError.PERMISSION_DENIED
                 e is java.io.IOException -> RecognitionError.NETWORK
                 else -> RecognitionError.UNKNOWN
             }
-            listener.onError(kind, e?.message ?: "All voice-input candidates failed.")
+            dispatchListener(generation, listener) {
+                onError(kind, e?.message ?: "All voice-input candidates failed.")
+            }
         }
     }
 
     private fun stopVad() {
-        detector?.let { runCatching { it.stop() } }
+        detector?.let {
+            it.rawAudioSink = null
+            runCatching { it.stop() }
+        }
         detector = null
         recording.set(false)
     }
@@ -493,22 +683,37 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
     }
 
     override fun stop() {
-        // Flip the capture loop off; the capture coroutine then hands the take
-        // to the transcription step, which delivers onFinal/onError.
+        // VoiceActivityDetector.stop() deliberately emits no in-progress
+        // segment. Finalise from our raw capture copy so a stop tap always
+        // produces onFinal/onError and the manager can leave FINISHING.
+        vadSession?.let {
+            finishVadSession(it, transcribeWithoutDetectedVoice = true)
+            return
+        }
+        // Legacy capture loop: flipping this flag hands its PCM take to the
+        // existing transcription path.
         recording.set(false)
-        detector?.let { runCatching { it.stop() } }
-        detector = null
     }
 
     override fun cancel() {
         cancelled.set(true)
-        recording.set(false)
+        callbackGeneration.incrementAndGet()
+        val session = vadSession
+        vadSession = null
+        session?.let {
+            synchronized(it.lock) {
+                it.terminalClaimed = true
+                it.holdFlushJob?.cancel()
+                it.holdFlushJob = null
+                it.pendingSegments.clear()
+                it.rawPcm.reset()
+            }
+        }
+        stopVad()
+        captureJob?.cancel()
+        captureJob = null
         transcribeJob?.cancel()
-        holdFlushJob?.cancel()
-        holdFlushJob = null
-        // Drop held audio: a cancelled session's partial utterance must never
-        // surface in a later one.
-        pendingSegments.clear()
+        transcribeJob = null
     }
 
     /** Rough dB estimate over the chunk for the UI waveform. */

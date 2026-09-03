@@ -58,7 +58,7 @@ class DatabaseVersionGuardTest {
         )
     }
 
-    /** The exported schema must actually contain the four attribution columns. */
+    /** The exported schema must contain every nullable additive message column. */
     @Test
     fun `exported schema has the attribution columns`() {
         val latest = exportedVersions().lastOrNull() ?: return
@@ -83,6 +83,10 @@ class DatabaseVersionGuardTest {
             // Nullability is load-bearing: NULL is how the Usage page tells a
             // pre-migration row apart from a measured one, and it is what lets
             // an older build INSERT without knowing these columns.
+            assertTrue("$col must be nullable", !f.getBoolean("notNull"))
+        }
+        for (col in listOf("translation_text", "translation_language")) {
+            val f = byName[col] ?: error("$col missing from exported messages schema")
             assertTrue("$col must be nullable", !f.getBoolean("notNull"))
         }
     }

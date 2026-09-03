@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronLeft
@@ -59,15 +60,15 @@ fun SpeechPlayerCapsule(
     val context = LocalContext.current
     LaunchedEffect(Unit) { VoiceOutputState.init(context) }
     val globalSpeaking by VoiceOutputState.isSpeaking.collectAsState()
-    val synthesizing by VoiceOutputState.isSynthesizing.collectAsState()
     val speed by VoiceOutputState.speed.collectAsState()
     val savedDragDp by VoiceOutputState.dragOffsetDp.collectAsState()
 
-    val activePlayer = VoiceOutputState.activePlayer
+    val activePlayer by VoiceOutputState.activePlayer.collectAsState()
     val idleBoolean = remember { kotlinx.coroutines.flow.MutableStateFlow(false) }
     val idleFloat = remember { kotlinx.coroutines.flow.MutableStateFlow(0f) }
     val playerSpeaking by (activePlayer?.isSpeaking ?: idleBoolean).collectAsState()
     val paused by (activePlayer?.isPaused ?: idleBoolean).collectAsState()
+    val synthesizing by (activePlayer?.isSynthesizing ?: idleBoolean).collectAsState()
     val playbackProgress by (activePlayer?.playbackProgress ?: idleFloat).collectAsState()
 
     if (!globalSpeaking && !playerSpeaking && !paused && !synthesizing) return
@@ -90,10 +91,16 @@ fun SpeechPlayerCapsule(
             if (bottomObstructionPx > 0) obstruction + 8.dp else 0.dp,
             additionalObstructionDp,
         )
+        val endInsetPx = with(density) { 10.dp.toPx() }
+        val bottomInsetPx = with(density) { (10.dp + lift).toPx() }
 
         fun clampOffset(value: Offset): Offset {
-            val minX = -(parentWidthPx - capsuleSize.width).coerceAtLeast(0f)
-            val minY = -(parentHeightPx - capsuleSize.height).coerceAtLeast(0f)
+            val minX = -(
+                parentWidthPx - capsuleSize.width - endInsetPx
+            ).coerceAtLeast(0f)
+            val minY = -(
+                parentHeightPx - capsuleSize.height - bottomInsetPx
+            ).coerceAtLeast(0f)
             return Offset(value.x.coerceIn(minX, 0f), value.y.coerceIn(minY, 0f))
         }
 
@@ -131,7 +138,7 @@ fun SpeechPlayerCapsule(
             tonalElevation = 3.dp,
             shadowElevation = 3.dp,
         ) {
-            Column {
+            Column(modifier = Modifier.width(if (expanded) 220.dp else 118.dp)) {
                 Row(
                     modifier = Modifier.padding(horizontal = 3.dp, vertical = 2.dp),
                     horizontalArrangement = Arrangement.spacedBy(0.dp),
@@ -196,7 +203,9 @@ fun SpeechPlayerCapsule(
                     0f
                 }
                 if (synthesizing && safeProgress == 0f) {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(2.dp))
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth().height(2.dp),
+                    )
                 } else {
                     LinearProgressIndicator(
                         progress = { safeProgress },

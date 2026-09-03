@@ -474,6 +474,8 @@ class BackupImporter(
                     modelDisplayName = m.str("modelDisplayName"),
                     providerType = m.str("providerType"),
                     providerInstanceId = m.str("providerInstanceId"),
+                    translationText = m.str("translationText"),
+                    translationLanguage = m.str("translationLanguage"),
                 )
             )
             report.imported += 1

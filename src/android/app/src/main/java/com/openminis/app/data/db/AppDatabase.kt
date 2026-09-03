@@ -15,7 +15,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         WebAppShortcutEntity::class,
         FolderEntity::class,
     ],
-    version = 12,
+    version = 13,
     // [T-android-downgrade-compat] Kept ON so MigrationTestHelper and CI can
     // validate every migration (and its downgrade counterpart) against the
     // committed schema json. Without it the upgrade/downgrade chain has no
@@ -308,6 +308,19 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** Persist translated assistant replies without modifying parts_json. */
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN translation_text TEXT")
+                db.execSQL("ALTER TABLE messages ADD COLUMN translation_language TEXT")
+            }
+        }
+
+        /** Additive nullable columns can remain present during a 13 -> 12 downgrade. */
+        val MIGRATION_13_12 = object : Migration(13, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) = Unit
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -321,7 +334,7 @@ abstract class AppDatabase : RoomDatabase() {
                     .addMigrations(
                         MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6,
                         MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
-                        MIGRATION_11_12, MIGRATION_12_11,
+                        MIGRATION_11_12, MIGRATION_12_11, MIGRATION_12_13, MIGRATION_13_12,
                     )
                     .build()
                     .also { INSTANCE = it }

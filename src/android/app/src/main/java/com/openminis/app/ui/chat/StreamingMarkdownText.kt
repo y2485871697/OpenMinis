@@ -64,6 +64,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -111,7 +112,8 @@ import com.openminis.app.ui.theme.ChatColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
@@ -496,43 +498,11 @@ private fun MdText(
  * - The LAST block is the only one that changes during streaming (text appends to it)
  * - Completed blocks above are structurally stable → Compose skips them
  *
- * Update cadence: while [isStreaming] is true, content updates are coalesced
- * to at most one re-parse every [STREAMING_THROTTLE_MS] (~120 ms). Pixel 4a
- * traces showed every TextDelta (~5 ms cadence) was triggering a full
- * `parseMarkdownBlocks` over the entire accumulating string + a recompose of
- * every RenderBlock — a 5-row markdown table plus a few tool calls was enough
- * to ANR the main thread with 22 MB GC every 2 s. Throttling the *display*
- * content (not the underlying StateFlow) keeps the conversation visually
- * live (3-4 fps of growth is plenty for reading) while leaving 90 % of the
- * frame budget free.
- *
- * When the stream finishes ([isStreaming] flips to false), the final value
- * is published immediately so the user never sees a truncated last frame.
+ * A stable snapshotFlow observes new content. Parsing runs on Default under
+ * mapLatest, so a newer provider chunk cancels obsolete parse work without
+ * cancelling/restarting the collector itself. The final snapshot is parsed
+ * normally when [isStreaming] flips to false.
  */
-// Adaptive streaming throttle, mirrors iOS CollectionViewMessageListV3
-// `flushStreamingLayout` (100 ms when auto-scrolling, 3 s when away). On
-// Android we don't have direct access to the chat-level scroll state from
-// here, so substitute "doc length" as a proxy: long documents already cost
-// more per parse pass, so amortize them by sampling less often. Crashes
-// observed on Pixel 6 traced to ICU `RegexPattern::matcher` allocations
-// piling up under Scudo (OOM at ~140s of streaming) — slowing parses on
-// large bodies cuts native allocation pressure dramatically.
-//
-// [T-android-stream-flush-dualpath] Time-throttle tiers ported verbatim from
-// iOS AIChatViewModel+SSEStream (the `throttle` ladder): the time path is one
-// Keep the legacy renderer in step with ChatViewModel's RikkaHub-style
-// near-frame updates. Longer documents still slow down progressively so
-// markdown parsing cannot monopolize the main thread.
-private fun streamingThrottleFor(content: String): Long = when {
-    content.length < 500 -> 24L
-    content.length < 2_000 -> 32L
-    content.length < 32_000 -> 100L
-    content.length < 64_000 -> 250L
-    content.length < 128_000 -> 500L
-    else -> 1_000L
-}
-
-
 @Composable
 fun StreamingMarkdownText(
     content: String,
@@ -556,36 +526,23 @@ private fun StreamingMarkdownTextBody(
     isStreaming: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    // While streaming, sample `content` at the adaptive throttle interval.
-    // produceState + snapshotFlow.conflate() makes the upstream value collection
-    // suspend-safe and frees the runtime to drop intermediate values when the
-    // collector falls behind. When streaming ends, emit the final value
-    // unconditionally so we don't render a stale half-block.
-    val displayContent by produceState(initialValue = content, content, isStreaming) {
-        if (!isStreaming) {
-            value = content
-            return@produceState
-        }
-        snapshotFlow { content }
-            .conflate()
-            .collect { latest ->
-                value = latest
-                delay(streamingThrottleFor(latest))
-            }
-    }
-    // [T-android-inline-parse-offmain] Theme snapshot for off-main prewarm.
+    // Read new snapshots from one stable collector. Keying LaunchedEffect on
+    // every content change used to cancel the in-flight Markdown parse before
+    // it could publish, which is why live replies could stay at one character.
+    val latestContent by rememberUpdatedState(content)
     val mdColors = currentMdColors()
     var blocks by remember { mutableStateOf<List<MdBlock>>(emptyList()) }
-    LaunchedEffect(displayContent) {
-        val computed = withContext(Dispatchers.Default) {
-            parseMarkdownBlocks(displayContent).also {
-                MarkdownParseCaches.prewarm(it, mdColors)
+    LaunchedEffect(isStreaming, mdColors) {
+        snapshotFlow { latestContent }
+            .distinctUntilChanged()
+            .mapLatest { snapshot ->
+                withContext(Dispatchers.Default) {
+                    parseMarkdownBlocks(snapshot).also {
+                        MarkdownParseCaches.prewarm(it, mdColors)
+                    }
+                }
             }
-        }
-        // If the LE was cancelled while parseMarkdownBlocks was still running
-        // (a newer chunk arrived), don't publish stale blocks.
-        coroutineContext.ensureActive()
-        blocks = computed
+            .collect { computed -> blocks = computed }
     }
 
     ShardSubIndexScope {
@@ -952,62 +909,42 @@ private fun MarkdownBlockBody(
     }
     // Live (streaming tail) block.
     //
-    // [T-android-stream-flush-dualpath] Throttling moved UP to the message
-    // accumulation layer (ChatViewModel.updateAssistantMessage) where the
-    // dual-path (time OR newline+chars) flush actually accumulates across the
-    // high-frequency token calls. The earlier per-fragment throttle here was
-    // structurally broken: streaming text is split into many short-lived
-    // fragment items, so this produceState (and its lastFlushMs accumulator)
-    // reset on every fragment rebuild and never throttled at all — diagnostics
-    // showed every tick flushing. `rawText` arriving here is already paced by
-    // the VM, so the fragment just renders it directly; parse stays off-main
-    // below.
-    val displayContent by produceState(initialValue = rawText, rawText) {
-        snapshotFlow { rawText }.conflate().collect { value = it }
-    }
+    // Provider chunks are published directly by ChatViewModel. Keep one stable
+    // collector and cancel obsolete parses when a newer fragment snapshot wins;
+    // explicit conflate/sample stages here would add latency and merge updates.
+    val latestRawText by rememberUpdatedState(rawText)
     // [T-android-inline-parse-offmain] Snapshot the theme colors in
     // composition so the Default-thread parse below can PREWARM the inline
     // caches with the exact keys RenderBlock will look up — main-thread
     // composition of the live block becomes a pure cache hit.
     val mdColors = currentMdColors()
     var blocks by remember { mutableStateOf<List<MdBlock>>(emptyList()) }
-    LaunchedEffect(displayContent) {
-        // [T-android-stream-render-profile] Time the whole off-main tick
-        // (block split + prewarm/incremental inline+math) — this is what the
-        // incremental optimization shrinks.
-        val parseStartNs = System.nanoTime()
-        val computed = withContext(Dispatchers.Default) {
-            parseMarkdownBlocks(displayContent).also {
-                // [T-android-streaming-incremental-inline] Prewarm the frozen
-                // blocks (all but the last) normally. The last block is the
-                // growing live tail: when it's a Paragraph, warm it
-                // incrementally (closed prefix reused + tiny fresh suffix) so
-                // the main-thread RenderBlock resolves to an exact HIT without
-                // re-scanning the whole accumulated paragraph; when it's a
-                // table/list/etc. (which RenderBlock parses non-incrementally)
-                // fall back to the normal per-block prewarm for it.
-                if (it.size > 1) MarkdownParseCaches.prewarm(it.dropLast(1), mdColors)
-                if (it.lastOrNull() is MdBlock.Paragraph) {
-                    MarkdownParseCaches.prewarmLiveTail(it, mdColors)
-                } else {
-                    it.lastOrNull()?.let { last -> MarkdownParseCaches.prewarm(listOf(last), mdColors) }
-                }
-                // [T-android-review-p1-fixes] F2(a): deposit the live parse
-                // into the blocks cache so the freeze edge (isStreaming →
-                // false recomposes into the frozen branch with this exact
-                // text) HITs synchronously — no plain-text preview flash, no
-                // off-main re-parse. Only for segments big enough to take
-                // the off-main MISS path at freeze; small ones parse sub-ms
-                // synchronously anyway, and skipping them keeps live ticks
-                // from churning the LRU.
-                if (displayContent.length > COLD_PARSE_OFFMAIN_THRESHOLD_CHARS) {
-                    MarkdownParseCaches.putBlocks(displayContent, it)
+    LaunchedEffect(mdColors) {
+        snapshotFlow { latestRawText }
+            .distinctUntilChanged()
+            .mapLatest { snapshot ->
+                withContext(Dispatchers.Default) {
+                    val parseStartNs = System.nanoTime()
+                    parseMarkdownBlocks(snapshot).also {
+                        if (it.size > 1) MarkdownParseCaches.prewarm(it.dropLast(1), mdColors)
+                        if (it.lastOrNull() is MdBlock.Paragraph) {
+                            MarkdownParseCaches.prewarmLiveTail(it, mdColors)
+                        } else {
+                            it.lastOrNull()?.let { last ->
+                                MarkdownParseCaches.prewarm(listOf(last), mdColors)
+                            }
+                        }
+                        if (snapshot.length > COLD_PARSE_OFFMAIN_THRESHOLD_CHARS) {
+                            MarkdownParseCaches.putBlocks(snapshot, it)
+                        }
+                        StreamRenderProfiler.recordParse(
+                            snapshot.length,
+                            (System.nanoTime() - parseStartNs) / 1_000_000.0,
+                        )
+                    }
                 }
             }
-        }
-        coroutineContext.ensureActive()
-        StreamRenderProfiler.recordParse(displayContent.length, (System.nanoTime() - parseStartNs) / 1_000_000.0)
-        blocks = computed
+            .collect { computed -> blocks = computed }
     }
     // [T-android-stream-grow-anim] No height/scroll animation here. We tried
     // animateContentSize to ease the bottom-pinned item's exposed height into a

@@ -380,6 +380,10 @@ class BackupExporter(
         m.modelDisplayName?.let { put("modelDisplayName", JsonPrimitive(it)) }
         m.providerType?.let { put("providerType", JsonPrimitive(it)) }
         m.providerInstanceId?.let { put("providerInstanceId", JsonPrimitive(it)) }
+        // Optional top-level fields keep MessageV2 backward compatible: older
+        // importers ignore them, while newer Android restores the translation.
+        m.translationText?.let { put("translationText", JsonPrimitive(it)) }
+        m.translationLanguage?.let { put("translationLanguage", JsonPrimitive(it)) }
     }
 
     private fun markerRecord(c: CompactMarkerEntity): JsonElement = buildJsonObject {

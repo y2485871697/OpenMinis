@@ -359,6 +359,17 @@ class ChatRepository(internal val dao: ChatDao) {
     suspend fun updateMessageParts(id: String, partsJson: String) =
         dao.updateMessageParts(id, partsJson)
 
+    /** Attach or clear display-only translation data on one persisted row. */
+    suspend fun updateMessageTranslation(messageId: String, text: String?, language: String?) =
+        dao.updateMessageTranslation(messageId, text, language)
+
+    /** Clear only the stale translation written by a superseded request. */
+    suspend fun clearMessageTranslationIfMatches(
+        messageId: String,
+        expectedText: String,
+        expectedLanguage: String,
+    ) = dao.clearMessageTranslationIfMatches(messageId, expectedText, expectedLanguage)
+
     /** [T-error-persist-android] Set/clear the error sticker on a row by id. */
     suspend fun updateMessageErrorInfo(messageId: String, errorInfo: String?) =
         dao.updateMessageErrorInfo(messageId, errorInfo)

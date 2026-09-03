@@ -69,7 +69,7 @@ internal fun ChatMessageSearchScreen(
             if (content.contains(needle, ignoreCase = true)) {
                 ChatSearchHit(message.id, message.role, searchSnippet(content, needle))
             } else null
-        }.asReversed()
+        }
     }
 
     Dialog(

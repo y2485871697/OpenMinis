@@ -1811,6 +1811,7 @@
     <string name="message_action_create_branch">创建分支</string>
     <string name="message_action_delete">从此处删除</string>
     <string name="message_translation_label">翻译</string>
+    <string name="message_translation_clear">清空翻译</string>
     <string name="message_branch_created">已创建分支：%1$s</string>
     <string name="message_branch_failed">无法创建分支</string>
 </resources>

@@ -110,6 +110,12 @@ class ReadAloudPlayer(context: Context) {
 
     private val _isPaused = MutableStateFlow(false)
     val isPaused: StateFlow<Boolean> = _isPaused.asStateFlow()
+    private val _isSynthesizing = MutableStateFlow(false)
+    val isSynthesizing: StateFlow<Boolean> = _isSynthesizing.asStateFlow()
+    private val _activeModelLabel = MutableStateFlow<String?>(null)
+    internal val activeModelLabel: StateFlow<String?> = _activeModelLabel.asStateFlow()
+    internal fun hasActiveOutput(): Boolean =
+        _isSpeaking.value || _isPaused.value || _isSynthesizing.value
     private val _currentChunkIndex = MutableStateFlow(0)
     val currentChunkIndex: StateFlow<Int> = _currentChunkIndex.asStateFlow()
     private val _totalChunks = MutableStateFlow(0)
@@ -150,9 +156,9 @@ class ReadAloudPlayer(context: Context) {
     }
 
     init {
-        // [T-android-tts-capsule] Register as the active player so the global
-        // capsule's mute/close/stop actions reach this instance, and mirror the
-        // live speaking flag into the global state the capsule renders from.
+        // Construction only registers. enqueue() promotes this instance once
+        // it has accepted real speech, so an idle lazy player cannot steal the
+        // shared capsule from another player.
         VoiceOutputState.init(appContext)
         VoiceOutputState.registerPlayer(this)
         worker = scope.launch {
@@ -170,7 +176,9 @@ class ReadAloudPlayer(context: Context) {
                 // Channel.isEmpty, which is experimental API.
                 if (pending.decrementAndGet() <= 0) {
                     _isSpeaking.value = false
+                    _activeModelLabel.value = null
                     if (ownsCapsule()) VoiceOutputState.isSpeaking.value = false
+                    VoiceOutputState.playerBecameIdle(this@ReadAloudPlayer)
                 }
             }
         }
@@ -253,6 +261,9 @@ class ReadAloudPlayer(context: Context) {
         // fenced code block) sanitizes to empty and must not occupy the queue.
         val clean = VoiceTextSanitizer.sanitize(raw, linkPhrases)
         if (clean.isBlank()) return
+        // A lazily-created but idle player must not own the shared controller.
+        // Promote only once this instance has accepted real speech work.
+        VoiceOutputState.promotePlayer(this)
         pending.incrementAndGet()
         _totalChunks.value = _totalChunks.value + 1
         _isSpeaking.value = true
@@ -293,10 +304,13 @@ class ReadAloudPlayer(context: Context) {
         system.stop()
         pending.set(0)
         _isSpeaking.value = false
+        _isSynthesizing.value = false
+        _activeModelLabel.value = null
         if (ownsCapsule()) {
             VoiceOutputState.isSpeaking.value = false
             VoiceOutputState.isSynthesizing.value = false
         }
+        VoiceOutputState.playerBecameIdle(this)
         AppLogger.info(TAG, "suspended for mic capture — held ${heldForCapture.size} utterance(s)")
     }
 
@@ -335,10 +349,13 @@ class ReadAloudPlayer(context: Context) {
         _totalChunks.value = 0
         _playbackProgress.value = 0f
         _isSpeaking.value = false
+        _isSynthesizing.value = false
+        _activeModelLabel.value = null
         if (ownsCapsule()) {
             VoiceOutputState.isSpeaking.value = false
-            if (ownsCapsule()) VoiceOutputState.isSynthesizing.value = false
+            VoiceOutputState.isSynthesizing.value = false
         }
+        VoiceOutputState.playerBecameIdle(this)
     }
 
     /** Pause provider audio precisely; system TTS resumes the current sentence. */
@@ -418,10 +435,9 @@ class ReadAloudPlayer(context: Context) {
             // [T-android-tts-capsule] Surface the ACTUALLY-synthesizing model
             // on the capsule's chip (falls back to the system label below when
             // this path fails over).
-            if (ownsCapsule()) {
-                VoiceOutputState.activeModelLabel.value =
-                    modelEntry.model.displayName.ifBlank { modelEntry.model.id }
-            }
+            val modelLabel = modelEntry.model.displayName.ifBlank { modelEntry.model.id }
+            _activeModelLabel.value = modelLabel
+            if (ownsCapsule()) VoiceOutputState.activeModelLabel.value = modelLabel
             val ok = runCatching { speakViaProvider(instance, modelEntry, text) }
                 .getOrElse {
                     AppLogger.error(
@@ -433,6 +449,7 @@ class ReadAloudPlayer(context: Context) {
                 }
             if (ok) return
         }
+        _activeModelLabel.value = null
         if (ownsCapsule()) VoiceOutputState.activeModelLabel.value = null // system engine
         if (!speakViaSystem(text)) {
             // [T-android-tts-silent-blackhole] Terminal state: the provider path
@@ -493,6 +510,7 @@ class ReadAloudPlayer(context: Context) {
         // [T-android-tts-capsule] Drives the capsule's rotating-arc loading
         // indicator while the network request is in flight (iOS
         // voicePlayer.isSynthesizing).
+        _isSynthesizing.value = true
         if (ownsCapsule()) VoiceOutputState.isSynthesizing.value = true
         val data = try {
             withContext(Dispatchers.IO) {
@@ -508,7 +526,8 @@ class ReadAloudPlayer(context: Context) {
                 )
             }
         } finally {
-            VoiceOutputState.isSynthesizing.value = false
+            _isSynthesizing.value = false
+            if (ownsCapsule()) VoiceOutputState.isSynthesizing.value = false
         }
         if (data.isEmpty()) {
             AppLogger.error(TAG, "provider TTS returned empty audio (model=${modelEntry.model.id})")

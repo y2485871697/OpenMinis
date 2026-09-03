@@ -576,6 +576,7 @@ fun ChatScreen(
     val compactProgress by viewModel.compactProgress.collectAsState()
     val error by viewModel.error.collectAsState()
     val messageTranslations by viewModel.messageTranslations.collectAsState()
+    val messageTranslationLanguages by viewModel.messageTranslationLanguages.collectAsState()
     val translatingMessageIds by viewModel.translatingMessageIds.collectAsState()
     val modelName by viewModel.modelName.collectAsState()
     val sessionTitle by viewModel.sessionTitle.collectAsState()
@@ -699,6 +700,7 @@ fun ChatScreen(
     val systemDictationLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
     ) { result ->
+        com.openminis.app.speech.VoiceOutputState.resumeAllAfterCapture()
         if (result.resultCode != android.app.Activity.RESULT_OK) return@rememberLauncherForActivityResult
         val recognized = result.data
             ?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)
@@ -713,6 +715,35 @@ fun ChatScreen(
             viewModel.setInputText(draft)
             viewModel.updateSlashMenuState(draft)
         }
+    }
+    val launchSystemDictation: (String) -> Unit = { prefix ->
+        systemDictationPrefix = prefix
+        com.openminis.app.speech.VoiceOutputState.suspendAllForCapture()
+        val intent = Intent(
+            android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH,
+        ).apply {
+            putExtra(
+                android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+            )
+            putExtra(
+                android.speech.RecognizerIntent.EXTRA_LANGUAGE,
+                com.openminis.app.speech.SpeechRecognitionManager.locale.value.toLanguageTag(),
+            )
+            putExtra(
+                android.speech.RecognizerIntent.EXTRA_PROMPT,
+                context.getString(R.string.voice_panel_no_engine_title),
+            )
+        }
+        runCatching { systemDictationLauncher.launch(intent) }
+            .onFailure {
+                com.openminis.app.speech.VoiceOutputState.resumeAllAfterCapture()
+                android.widget.Toast.makeText(
+                    context,
+                    context.getString(R.string.voice_panel_no_engine_body),
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
+            }
     }
 
     // ─── T51: Share Injection + Move-to capsule ───────────────────────
@@ -2942,13 +2973,9 @@ fun ChatScreen(
                         MinisMenu(
                             expanded = showChatMenu,
                             onDismissRequest = { showChatMenu = false },
-                            // Keep the expanded tools menu clear of the composer
-                            // and status bar. All entries remain reachable via
-                            // the menu's built-in vertical scrolling.
-                            modifier = Modifier.heightIn(
-                                max = (configuration.screenHeightDp * 0.58f).dp,
-                            ),
                         ) {
+                            val compactMenuItemModifier = Modifier.height(40.dp)
+                            val compactMenuItemPadding = PaddingValues(horizontal = 12.dp)
                             // [T-android-memory-enabled-minisconfig] Gate the
                             // "Memories in Session" item below on the session's
                             // live memoryEnabled — when memory is off the entry
@@ -2960,6 +2987,8 @@ fun ChatScreen(
                             // (iOS parity: square.and.pencil at the top of the
                             // "..." menu). Streaming sessions confirm first.
                             DropdownMenuItem(
+                                modifier = compactMenuItemModifier,
+                                contentPadding = compactMenuItemPadding,
                                 text = { Text(stringResource(R.string.chat_menu_new_chat)) },
                                 onClick = {
                                     showChatMenu = false
@@ -2974,6 +3003,8 @@ fun ChatScreen(
                                 },
                             )
                             DropdownMenuItem(
+                                modifier = compactMenuItemModifier,
+                                contentPadding = compactMenuItemPadding,
                                 text = { Text(stringResource(R.string.chat_menu_search_messages)) },
                                 onClick = {
                                     showChatMenu = false
@@ -2986,6 +3017,8 @@ fun ChatScreen(
                             MinisMenuDivider()
                             // Clear Chat (iOS parity, red)
                             DropdownMenuItem(
+                                modifier = compactMenuItemModifier,
+                                contentPadding = compactMenuItemPadding,
                                 text = { Text(stringResource(R.string.chat_menu_clear_chat), color = MaterialTheme.colorScheme.error) },
                                 onClick = {
                                     showChatMenu = false
@@ -2998,6 +3031,8 @@ fun ChatScreen(
                             MinisMenuDivider()
                             // Open Terminal (iOS parity) — session-bound, starts in /var/minis
                             DropdownMenuItem(
+                                modifier = compactMenuItemModifier,
+                                contentPadding = compactMenuItemPadding,
                                 text = { Text(stringResource(R.string.chat_menu_open_terminal)) },
                                 onClick = {
                                     showChatMenu = false
@@ -3009,6 +3044,8 @@ fun ChatScreen(
                             )
                             // Open Browser (iOS parity)
                             DropdownMenuItem(
+                                modifier = compactMenuItemModifier,
+                                contentPadding = compactMenuItemPadding,
                                 text = { Text(stringResource(R.string.chat_menu_open_browser)) },
                                 onClick = {
                                     showChatMenu = false
@@ -3020,6 +3057,8 @@ fun ChatScreen(
                             )
                             // Browse Chat Files (iOS parity) — opens file browser at /var/minis
                             DropdownMenuItem(
+                                modifier = compactMenuItemModifier,
+                                contentPadding = compactMenuItemPadding,
                                 text = { Text(stringResource(R.string.chat_menu_browse_chat_files)) },
                                 onClick = {
                                     showChatMenu = false
@@ -3033,6 +3072,8 @@ fun ChatScreen(
                             // Session Skills (iOS parity)
                             if (skillRepository != null) {
                                 DropdownMenuItem(
+                                    modifier = compactMenuItemModifier,
+                                    contentPadding = compactMenuItemPadding,
                                     text = { Text(stringResource(R.string.session_skills_title)) },
                                     onClick = {
                                         showChatMenu = false
@@ -3046,6 +3087,8 @@ fun ChatScreen(
                             // [T-mcp-integration-android] MCPs in Session, next to Skills.
                             if (mcpRepository != null) {
                                 DropdownMenuItem(
+                                    modifier = compactMenuItemModifier,
+                                    contentPadding = compactMenuItemPadding,
                                     text = { Text(stringResource(R.string.session_mcps_title)) },
                                     onClick = {
                                         showChatMenu = false
@@ -3059,6 +3102,8 @@ fun ChatScreen(
                             // Session Memory (iOS parity)
                             if (memoryRepository != null && menuMemoryEnabled) {
                                 DropdownMenuItem(
+                                    modifier = compactMenuItemModifier,
+                                    contentPadding = compactMenuItemPadding,
                                     text = { Text(stringResource(R.string.session_memory_title)) },
                                     onClick = {
                                         showChatMenu = false
@@ -3072,6 +3117,8 @@ fun ChatScreen(
                             MinisMenuDivider()
                             // Token Usage (iOS parity)
                             DropdownMenuItem(
+                                modifier = compactMenuItemModifier,
+                                contentPadding = compactMenuItemPadding,
                                 text = { Text(stringResource(R.string.settings_token_usage)) },
                                 onClick = {
                                     showChatMenu = false
@@ -3091,6 +3138,8 @@ fun ChatScreen(
                             val enhancedCacheOn by viewModel.enhancedCacheEnabled.collectAsState()
                             if (showEnhancedCache) {
                                 DropdownMenuItem(
+                                    modifier = compactMenuItemModifier,
+                                    contentPadding = compactMenuItemPadding,
                                     text = { Text(stringResource(R.string.chat_menu_enhanced_cache)) },
                                     onClick = {
                                         if (enhancedCacheOn) {
@@ -3136,6 +3185,8 @@ fun ChatScreen(
                             val fastModeOn by viewModel.fastModeEnabled.collectAsState()
                             if (showFastMode) {
                                 DropdownMenuItem(
+                                    modifier = compactMenuItemModifier,
+                                    contentPadding = compactMenuItemPadding,
                                     text = { Text(stringResource(R.string.chat_menu_fast_mode)) },
                                     onClick = { viewModel.setFastModeEnabled(!fastModeOn) },
                                     leadingIcon = {
@@ -3157,6 +3208,8 @@ fun ChatScreen(
                             // controls the user flips mid-conversation.
                             val autoCompactOn by viewModel.autoCompactEnabled.collectAsState()
                             DropdownMenuItem(
+                                modifier = compactMenuItemModifier,
+                                contentPadding = compactMenuItemPadding,
                                 text = { Text(stringResource(R.string.chat_menu_auto_compact)) },
                                 onClick = { viewModel.setAutoCompactEnabled(!autoCompactOn) },
                                 leadingIcon = {
@@ -3177,6 +3230,8 @@ fun ChatScreen(
                             if (BuildConfig.DEBUG) {
                                 MinisMenuDivider()
                                 DropdownMenuItem(
+                                    modifier = compactMenuItemModifier,
+                                    contentPadding = compactMenuItemPadding,
                                     text = {
                                         Text(
                                             stringResource(R.string.debug_trigger_crash_menu),
@@ -3452,9 +3507,10 @@ fun ChatScreen(
                     // seedKeys. Frozen rows are the same instances every tick,
                     // so LazyColumn's key+equals skip path sees ZERO change.
                     //
-                    // The ViewModel emits paced, character-limited frames. Sample
-                    // at display cadence so two frames are not merged back into
-                    // one visibly larger text jump here.
+                    // Provider chunks already arrive through a StateFlow (which
+                    // retains the latest value). Do not add another conflate/sample
+                    // layer here: it delays short chunks and merges them into the
+                    // multi-line jumps this collector is meant to avoid.
                     var frozenRows: List<FlatChatItem> = emptyList()
                     var frozenKeys: Set<String> = emptySet()
                     var frozenSplitIdx = -1
@@ -3472,8 +3528,6 @@ fun ChatScreen(
                         kotlinx.coroutines.flow.flowOf(messages),
                         viewModel.streamingById,
                     ) { msgs, stream -> msgs to stream }
-                        .conflate()
-                        .sample(16L)
                         .collect { (msgs, stream) ->
                             val tickStartNs = System.nanoTime()
                             if (stream.isNotEmpty() && !streamWasActive) {
@@ -4318,6 +4372,7 @@ fun ChatScreen(
                             is FlatChatItem.AssistantActions -> AssistantMessageActions(
                                 messageMarkdown = item.messageMarkdown,
                                 translation = messageTranslations[item.messageId],
+                                translationLanguage = messageTranslationLanguages[item.messageId],
                                 isTranslating = item.messageId in translatingMessageIds,
                                 onRegenerate = item.retryUserMessageId
                                     ?.takeUnless { isStreaming }
@@ -4332,6 +4387,9 @@ fun ChatScreen(
                                 onReadAloud = { selectionReader.speak(item.messageMarkdown) },
                                 onTranslate = { language ->
                                     viewModel.translateAssistantMessage(item.messageId, language)
+                                },
+                                onClearTranslation = {
+                                    viewModel.clearAssistantMessageTranslation(item.messageId)
                                 },
                                 onEdit = { text ->
                                     safeMutate { viewModel.editAssistantMessage(item.messageId, text) }
@@ -6372,31 +6430,7 @@ fun ChatScreen(
                                 // that Activity as the lightweight tap fallback;
                                 // long-press still opens Minis' full voice panel.
                                 if (!manager.isAvailable.value) {
-                                    systemDictationPrefix = prefix
-                                    val intent = Intent(
-                                        android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH,
-                                    ).apply {
-                                        putExtra(
-                                            android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                                            android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
-                                        )
-                                        putExtra(
-                                            android.speech.RecognizerIntent.EXTRA_LANGUAGE,
-                                            manager.locale.value.toLanguageTag(),
-                                        )
-                                        putExtra(
-                                            android.speech.RecognizerIntent.EXTRA_PROMPT,
-                                            context.getString(R.string.voice_panel_no_engine_title),
-                                        )
-                                    }
-                                    runCatching { systemDictationLauncher.launch(intent) }
-                                        .onFailure {
-                                            android.widget.Toast.makeText(
-                                                context,
-                                                context.getString(R.string.voice_panel_no_engine_body),
-                                                android.widget.Toast.LENGTH_LONG,
-                                            ).show()
-                                        }
+                                    launchSystemDictation(prefix)
                                     return@launch
                                 }
                                 manager.startRecording(
@@ -6408,11 +6442,20 @@ fun ChatScreen(
                                         }
                                     },
                                     onError = { error, detail ->
-                                        android.widget.Toast.makeText(
-                                            context,
-                                            detail ?: error.name,
-                                            android.widget.Toast.LENGTH_SHORT,
-                                        ).show()
+                                        if (error in setOf(
+                                                com.openminis.app.speech.RecognitionError.OEM_NO_SERVICE,
+                                                com.openminis.app.speech.RecognitionError.TRANSCRIPTION_FAILED,
+                                                com.openminis.app.speech.RecognitionError.LANGUAGE_UNSUPPORTED,
+                                            )
+                                        ) {
+                                            launchSystemDictation(prefix)
+                                        } else {
+                                            android.widget.Toast.makeText(
+                                                context,
+                                                detail ?: error.name,
+                                                android.widget.Toast.LENGTH_SHORT,
+                                            ).show()
+                                        }
                                     },
                                 )
                             }

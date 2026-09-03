@@ -61,4 +61,10 @@ data class MessageEntity(
     @ColumnInfo(name = "provider_type") val providerType: String? = null,
     /** Diagnostics / disambiguation only — the UI never resolves through it. */
     @ColumnInfo(name = "provider_instance_id") val providerInstanceId: String? = null,
+    // Display-only translation attached to this assistant message. These are
+    // columns rather than a custom content part so they never enter model
+    // history or break older/cross-platform content-part decoders.
+    @ColumnInfo(name = "translation_text") val translationText: String? = null,
+    /** Stable BCP-47 tag (for example `en` or `zh-Hans`), not a UI label. */
+    @ColumnInfo(name = "translation_language") val translationLanguage: String? = null,
 )

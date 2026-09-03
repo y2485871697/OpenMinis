@@ -2,6 +2,7 @@ package com.openminis.app.speech
 
 import android.Manifest
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -45,21 +46,39 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
     private var recognizer: SpeechRecognizer? = null
     private var listener: SpeechRecognitionEngine.Listener? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    @Volatile private var recognizerGeneration: Long = 0L
+    @Volatile private var explicitServiceRetryUsed: Boolean = false
+    @Volatile private var explicitServiceCandidate: ComponentName? = null
+    @Volatile private var sessionExplicitService: ComponentName? = null
+    private fun onDeviceRecognizerAvailable(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            runCatching {
+                SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)
+            }.getOrDefault(false)
+
+    /** Resolve an installed service explicitly; some OEMs ship one without
+     * registering it as the platform default used by createSpeechRecognizer. */
+    private fun recognitionServiceComponent(): ComponentName? {
+        val resolved = runCatching {
+            appContext.packageManager
+                .queryIntentServices(Intent(RecognitionService.SERVICE_INTERFACE), 0)
+                .asSequence()
+                .mapNotNull { info ->
+                    info.serviceInfo?.let { ComponentName(it.packageName, it.name) }
+                }
+                .firstOrNull()
+        }.getOrNull()
+        return resolved
+    }
 
     override val isAvailable: Boolean
         get() {
             if (degraded) return false
-            // Two-layer probe. The first returns true on many Chinese ROMs
-            // that actually ship no real service — the intent query is the
-            // backstop. Both cheap.
-            val systemSaysYes = try { SpeechRecognizer.isRecognitionAvailable(appContext) }
-                catch (_: Throwable) { false }
-            if (!systemSaysYes) return false
-            val intent = Intent(RecognitionService.SERVICE_INTERFACE)
-            val services = try {
-                appContext.packageManager.queryIntentServices(intent, 0)
-            } catch (_: Throwable) { emptyList() }
-            return services.isNotEmpty()
+            if (onDeviceRecognizerAvailable()) return true
+            if (recognitionServiceComponent() != null) return true
+            return runCatching {
+                SpeechRecognizer.isRecognitionAvailable(appContext)
+            }.getOrDefault(false)
         }
 
     override val supportedLocales: List<Locale>
@@ -146,6 +165,9 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
 
     override fun start(locale: Locale, listener: SpeechRecognitionEngine.Listener) {
         this.listener = listener
+        explicitServiceRetryUsed = false
+        explicitServiceCandidate = null
+        sessionExplicitService = null
         bufferedPartial = null
         heardSpeech = false
         sessionCommitted = false
@@ -470,6 +492,9 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
      * mic-grab fight that a full stop/start would cause.
      */
     private fun restartRecogniserForNextSegment() {
+        // Retire the old listener before rebuilding its pipe. Some OEMs can
+        // deliver another terminal callback while destroy is in progress.
+        recognizerGeneration += 1L
         val locale = continuousLocale ?: run {
             Log.w(TAG, "[continuous] no locale to restart with — ending dictation")
             endContinuousSession()
@@ -505,8 +530,9 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
         val all = joinedTranscript(bufferedPartial.orEmpty())
         segmentTranscript.setLength(0)
         bufferedPartial = null
-        if (all.isNotEmpty()) listener?.onFinal(all) else listener?.onFinal("")
+        val callback = listener
         tearDown()
+        callback?.onFinal(all)
     }
 
     private fun closeAudioPipe() {
@@ -544,37 +570,110 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
      * (SODA) recognizer answers ERROR_LANGUAGE_UNAVAILABLE we restart once with
      * it false, which forces the regular (typically cloud) recognizer.
      */
-    private fun startInternal(locale: Locale, allowOnDeviceRetry: Boolean) {
-        mainHandler.post {
+    private fun startInternal(
+        locale: Locale,
+        allowOnDeviceRetry: Boolean,
+        forcedService: ComponentName? = null,
+    ) {
+        // Reserve the generation before queueing work. A cancel that arrives
+        // before this runnable executes then invalidates the pending start,
+        // instead of letting an abandoned recognizer open the microphone.
+        val generation = ++recognizerGeneration
+        val startNow = Runnable {
+            if (generation != recognizerGeneration) return@Runnable
             try {
-                // Only reach for the on-device recognizer when the user actually
-                // asked for offline. It used to be created unconditionally on
-                // S+, which silently overrode the panel's "System Recognition
-                // (Online)" choice — and on a device with no on-device pack for
-                // the locale (e.g. a zh-CN Pixel 4a) SODA fails every session
-                // with "Failed to get language pack" / ERROR_LANGUAGE_
-                // UNAVAILABLE(12), so the mic opened and closed instantly.
-                val wantOnDevice = preferOffline &&
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                    allowOnDeviceRetry
-                val r = if (wantOnDevice) {
-                    try { SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext) }
-                    catch (_: Throwable) { SpeechRecognizer.createSpeechRecognizer(appContext) }
+                val service = recognitionServiceComponent()
+                val selectedExplicitService = forcedService ?: sessionExplicitService
+                val canUseOnDevice = onDeviceRecognizerAvailable()
+                val defaultAvailable = runCatching {
+                    SpeechRecognizer.isRecognitionAvailable(appContext)
+                }.getOrDefault(false)
+                val wantOnDevice = allowOnDeviceRetry && canUseOnDevice &&
+                    (preferOffline || (!defaultAvailable && service == null))
+                explicitServiceCandidate = if (
+                    selectedExplicitService == null &&
+                    !explicitServiceRetryUsed &&
+                    !wantOnDevice &&
+                    defaultAvailable
+                ) {
+                    service
                 } else {
-                    SpeechRecognizer.createSpeechRecognizer(appContext)
+                    null
                 }
-                usingOnDevice = wantOnDevice
+                val (r, isOnDevice) = when {
+                    selectedExplicitService != null ->
+                        SpeechRecognizer.createSpeechRecognizer(appContext, selectedExplicitService) to false
+                    wantOnDevice -> runCatching {
+                        SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext) to true
+                    }.getOrElse {
+                        val fallback = service?.let {
+                            SpeechRecognizer.createSpeechRecognizer(appContext, it)
+                        } ?: SpeechRecognizer.createSpeechRecognizer(appContext)
+                        fallback to false
+                    }
+                    defaultAvailable ->
+                        SpeechRecognizer.createSpeechRecognizer(appContext) to false
+                    service != null ->
+                        SpeechRecognizer.createSpeechRecognizer(appContext, service) to false
+                    canUseOnDevice && allowOnDeviceRetry ->
+                        SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext) to true
+                    else -> SpeechRecognizer.createSpeechRecognizer(appContext) to false
+                }
+                usingOnDevice = isOnDevice
                 pendingLocale = locale
                 recognizer = r
-                r.setRecognitionListener(callbacks)
+                r.setRecognitionListener(guardedCallbacks(generation))
                 r.startListening(buildIntent(locale))
             } catch (e: Throwable) {
                 Log.w(TAG, "startListening threw: ${e.message}")
-                this.listener?.onError(RecognitionError.UNKNOWN, e.message)
+                if (retryWithExplicitService(locale)) return@Runnable
+                val callback = this.listener
                 markDegraded()
                 tearDown()
+                callback?.onError(RecognitionError.OEM_NO_SERVICE, e.message)
             }
         }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            startNow.run()
+        } else {
+            mainHandler.post(startNow)
+        }
+    }
+
+    /**
+     * Some OEMs advertise a usable implicit recognizer but fail as soon as it
+     * starts. Retry the enumerated service explicitly once for this user
+     * session. A fresh injected-audio pipe is required because the failed
+     * recognizer may already have consumed or closed the previous read end.
+     */
+    private fun retryWithExplicitService(locale: Locale): Boolean {
+        val service = explicitServiceCandidate ?: return false
+        if (explicitServiceRetryUsed) return false
+        explicitServiceRetryUsed = true
+        explicitServiceCandidate = null
+        sessionExplicitService = service
+
+        recognizerGeneration += 1L
+        try { recognizer?.destroy() } catch (_: Throwable) {}
+        recognizer = null
+
+        if (feedingAudio) {
+            closeAudioPipe()
+            val pipe = try {
+                android.os.ParcelFileDescriptor.createPipe()
+            } catch (t: Throwable) {
+                Log.w(TAG, "explicit-service retry could not re-open pipe: ${t.message}")
+                return false
+            }
+            audioPipeRead = pipe[0]
+            audioPipeWrite = pipe[1]
+            audioPipeStream = android.os.ParcelFileDescriptor.AutoCloseOutputStream(pipe[1])
+            feedingAudio = true
+        }
+
+        Log.i(TAG, "implicit recognizer failed; retrying once via $service")
+        startInternal(locale, allowOnDeviceRetry = false, forcedService = service)
+        return true
     }
 
     /** True when the live session is using the on-device recognizer. */
@@ -616,10 +715,15 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
     }
 
     override fun cancel() {
-        mainHandler.post {
+        val cancelNow = Runnable {
             try { recognizer?.cancel() }
             catch (e: Throwable) { Log.w(TAG, "cancel: ${e.message}") }
             tearDown()
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            cancelNow.run()
+        } else {
+            mainHandler.post(cancelNow)
         }
     }
 
@@ -632,6 +736,9 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
     }
 
     private fun tearDown() {
+        recognizerGeneration += 1L
+        explicitServiceCandidate = null
+        sessionExplicitService = null
         try { recognizer?.destroy() } catch (_: Throwable) {}
         recognizer = null
         // [T-android-vad] The VAD holds the mic; leaking it past a session
@@ -652,6 +759,37 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
         holdFlushRunnable = null
         heldSpokenSeconds = 0f
     }
+
+    /** Ignore callbacks delivered by a recognizer destroyed before a new session. */
+    private fun guardedCallbacks(generation: Long): RecognitionListener =
+        object : RecognitionListener {
+            private inline fun ifCurrent(block: () -> Unit) {
+                if (generation == recognizerGeneration) block()
+            }
+
+            override fun onReadyForSpeech(params: Bundle?) =
+                ifCurrent { callbacks.onReadyForSpeech(params) }
+            override fun onBeginningOfSpeech() =
+                ifCurrent { callbacks.onBeginningOfSpeech() }
+            override fun onRmsChanged(rmsdB: Float) =
+                ifCurrent { callbacks.onRmsChanged(rmsdB) }
+            override fun onBufferReceived(buffer: ByteArray?) =
+                ifCurrent { callbacks.onBufferReceived(buffer) }
+            override fun onEndOfSpeech() =
+                ifCurrent { callbacks.onEndOfSpeech() }
+            override fun onError(error: Int) =
+                ifCurrent { callbacks.onError(error) }
+            override fun onResults(results: Bundle?) =
+                ifCurrent { callbacks.onResults(results) }
+            override fun onPartialResults(partialResults: Bundle?) =
+                ifCurrent { callbacks.onPartialResults(partialResults) }
+            override fun onEvent(eventType: Int, params: Bundle?) =
+                ifCurrent { callbacks.onEvent(eventType, params) }
+            override fun onSegmentResults(segmentResults: Bundle) =
+                ifCurrent { callbacks.onSegmentResults(segmentResults) }
+            override fun onEndOfSegmentedSession() =
+                ifCurrent { callbacks.onEndOfSegmentedSession() }
+        }
 
     /**
      * [T-android-vad] Last interim hypothesis, held back from the UI. See
@@ -921,28 +1059,37 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
             sessionCommitted = true
             if (text.isBlank() && heardSpeech) {
                 Log.w(TAG, "[commit] speech heard but zero text — surfacing TRANSCRIPTION_FAILED")
-                listener?.onError(
+                val callback = listener
+                tearDown()
+                callback?.onError(
                     RecognitionError.TRANSCRIPTION_FAILED,
                     "Speech detected but nothing was transcribed. If this keeps happening, " +
                         "install the offline language pack in system voice-input settings, " +
                         "or switch to a provider recognizer.",
                 )
-                tearDown()
                 return
             }
-            listener?.onFinal(text)
+            val callback = listener
             tearDown()
+            callback?.onFinal(text)
         }
 
         override fun onError(errorCode: Int) {
             val err = mapError(errorCode)
             val msg = errorMessage(errorCode)
+            val retryLocale = pendingLocale
+            val defaultEndpointFailed =
+                errorCode == SpeechRecognizer.ERROR_CLIENT || errorCode == 11
+            if (!heardSpeech && defaultEndpointFailed && retryLocale != null &&
+                retryWithExplicitService(retryLocale)
+            ) {
+                return
+            }
             // [T-android-asr-ondevice-fallback] The on-device recognizer has no
             // language pack for this locale. That is a property of THIS
             // recognizer, not of the device's speech support — the cloud one
             // usually handles the same locale fine. Restart once against the
             // regular recognizer instead of surfacing a dead end to the user.
-            val retryLocale = pendingLocale
             if (err == RecognitionError.LANGUAGE_UNSUPPORTED && usingOnDevice && retryLocale != null) {
                 Log.i(TAG, "on-device recognizer lacks a pack for the locale — retrying via the default recognizer")
                 usingOnDevice = false
@@ -1003,8 +1150,9 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
             if (salvaged.isNotEmpty()) {
                 Log.i(TAG, "[continuous] salvaging ${salvaged.length} chars from error $errorCode")
                 bufferedPartial = null
-                listener?.onFinal(salvaged)
+                val callback = listener
                 tearDown()
+                callback?.onFinal(salvaged)
                 return
             }
             // [T-android-asr-silent-failure] NO_MATCH with nothing salvaged is
@@ -1026,8 +1174,9 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
                     "install the offline language pack in system voice-input settings, " +
                     "or switch to a provider recognizer."
             } else msg
-            listener?.onError(effErr, effMsg)
+            val callback = listener
             tearDown()
+            callback?.onError(effErr, effMsg)
         }
     }
 

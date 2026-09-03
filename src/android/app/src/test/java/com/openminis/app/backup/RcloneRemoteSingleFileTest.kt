@@ -125,6 +125,25 @@ class RcloneRemoteSingleFileTest {
         assertFalse(RcloneChunkedUpload.isMethodNotAllowed("401 Unauthorized"))
     }
 
+    @Test
+    fun `openlist 189 timestamp failure is recognised without retrying upload`() {
+        val actualNarrowSpace =
+            "parsing time \"Sep 3, 2026, 3:09:39\u202FPM +08\" as " +
+                "\"Jan 2, 2006 15:04:05 PM -07\": cannot parse"
+        val escapedNarrowSpace =
+            "parsing time \"Sep 3, 2026, 3:09:39\\xe2\\x80\\xafPM +08\" as " +
+                "\"Jan 2, 2006 15:04:05 PM -07\": cannot parse"
+
+        assertTrue(RcloneChunkedUpload.isOpenList189TimeParseFailure(actualNarrowSpace))
+        assertTrue(RcloneChunkedUpload.isOpenList189TimeParseFailure(escapedNarrowSpace))
+        assertFalse(RcloneChunkedUpload.isOpenList189TimeParseFailure("401 Unauthorized"))
+        assertFalse(
+            RcloneChunkedUpload.isOpenList189TimeParseFailure(
+                "parsing time failed with an unrelated layout",
+            ),
+        )
+    }
+
     /** A scratch file must never be offered as a restorable backup. */
     @Test
     fun `in-flight scratch is not listed as a package`() {

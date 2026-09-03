@@ -3,6 +3,7 @@ package com.openminis.app.speech
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import com.openminis.app.R
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -278,7 +279,9 @@ object SpeechRecognitionManager {
         if (_state.value == RecognitionState.RECORDING || _state.value == RecognitionState.STARTING) {
             val cb = activeCallbacks
             if (cb != null) {
-                currentEngine()?.cancel()
+                activeSessionToken = null
+                activeEngine?.cancel()
+                activeEngine = null
                 setState(RecognitionState.IDLE)
                 startRecording(cb.first, cb.second)
             }
@@ -287,6 +290,11 @@ object SpeechRecognitionManager {
 
     /** Callbacks from the most recent [startRecording] so [selectLocale] can restart with them. */
     private var activeCallbacks: Pair<(String, Boolean) -> Unit, (RecognitionError, String?) -> Unit>? = null
+
+    /** Engine that owns the live microphone session, including a fallback. */
+    @Volatile private var activeEngine: SpeechRecognitionEngine? = null
+    /** Invalidated on cancel/restart so late OEM callbacks cannot revive capture. */
+    @Volatile private var activeSessionToken: Any? = null
 
     fun availableEngines(): List<SpeechRecognitionEngine> = engines.toList()
 
@@ -323,7 +331,10 @@ object SpeechRecognitionManager {
         val engine = currentEngine()
         if (engine == null) {
             _lastError.value = RecognitionError.OEM_NO_SERVICE
-            onError(RecognitionError.OEM_NO_SERVICE, "No recognition engine available")
+            onError(
+                RecognitionError.OEM_NO_SERVICE,
+                appContext.getString(R.string.voice_panel_no_engine_body),
+            )
             return
         }
 
@@ -343,18 +354,27 @@ object SpeechRecognitionManager {
         resetLevels()
         activeCallbacks = onPartialOrFinal to onError
 
+        var callbackEngine = engine
+        val sessionToken = Any()
+        activeSessionToken = sessionToken
+        activeEngine = engine
         val listener = object : SpeechRecognitionEngine.Listener {
             override fun onReadyForSpeech() {
+                if (activeSessionToken !== sessionToken) return
                 setState(RecognitionState.RECORDING)
             }
 
             override fun onPartial(text: String) {
+                if (activeSessionToken !== sessionToken) return
                 _recognizedText.value = text
                 onPartialOrFinal(text, false)
             }
 
             override fun onFinal(text: String) {
+                if (activeSessionToken !== sessionToken) return
                 if (text.isNotEmpty()) _recognizedText.value = text
+                activeSessionToken = null
+                activeEngine = null
                 onPartialOrFinal(text, true)
                 setState(RecognitionState.IDLE)
                 resetLevels()
@@ -362,6 +382,41 @@ object SpeechRecognitionManager {
             }
 
             override fun onError(error: RecognitionError, message: String?) {
+                if (activeSessionToken !== sessionToken) return
+                // A system recognizer can be advertised by an OEM and still
+                // fail at first use. If the user configured a provider ASR,
+                // continue the same tap through it instead of requiring a
+                // second tap or showing the system-activity fallback first.
+                if (error in setOf(
+                        RecognitionError.OEM_NO_SERVICE,
+                        RecognitionError.TRANSCRIPTION_FAILED,
+                        RecognitionError.LANGUAGE_UNSUPPORTED,
+                    ) && callbackEngine.id == "system"
+                ) {
+                    val providerFallback = engines.firstOrNull {
+                        it.id == "provider" && it.isAvailable
+                    }
+                    if (providerFallback != null) {
+                        Log.i(TAG, "system recognizer unavailable; retrying with provider ASR")
+                        callbackEngine = providerFallback
+                        activeEngine = providerFallback
+                        setState(RecognitionState.STARTING)
+                        try {
+                            providerFallback.start(_locale.value, this)
+                        } catch (fallbackError: Throwable) {
+                            activeSessionToken = null
+                            activeEngine = null
+                            _lastError.value = RecognitionError.UNKNOWN
+                            setState(RecognitionState.IDLE)
+                            resetLevels()
+                            onError(RecognitionError.UNKNOWN, fallbackError.message)
+                            refreshAvailability()
+                        }
+                        return
+                    }
+                }
+                activeSessionToken = null
+                activeEngine = null
                 _lastError.value = error
                 setState(RecognitionState.IDLE)
                 resetLevels()
@@ -375,6 +430,8 @@ object SpeechRecognitionManager {
         try {
             engine.start(_locale.value, listener)
         } catch (e: Throwable) {
+            activeSessionToken = null
+            activeEngine = null
             setState(RecognitionState.IDLE)
             _lastError.value = RecognitionError.UNKNOWN
             onError(RecognitionError.UNKNOWN, e.message)
@@ -384,11 +441,14 @@ object SpeechRecognitionManager {
     fun stopRecording() {
         if (_state.value != RecognitionState.RECORDING && _state.value != RecognitionState.STARTING) return
         setState(RecognitionState.FINISHING)
-        currentEngine()?.stop()
+        activeEngine?.stop()
     }
 
     fun cancelRecording() {
-        currentEngine()?.cancel()
+        activeSessionToken = null
+        val engine = activeEngine
+        activeEngine = null
+        engine?.cancel()
         setState(RecognitionState.IDLE)
         _recognizedText.value = ""
     }
