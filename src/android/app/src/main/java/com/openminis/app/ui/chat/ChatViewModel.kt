@@ -11605,6 +11605,10 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
 
     fun cancelStream() {
         AppLogger.info(TAG_STREAM, "cancelStream invoked _isStreaming=false (sid=$activeSessionId)")
+        // Invalidate the stream before cancelling the HTTP job. OkHttp/callback
+        // flows can deliver one or two buffered events while cancellation is
+        // unwinding; those events must not mutate the just-cancelled reply.
+        streamGeneration.incrementAndGet()
         streamJob?.cancel()
         _isStreaming.value = false
         // T-streaming-side-channel: flush any in-flight delta back into the
