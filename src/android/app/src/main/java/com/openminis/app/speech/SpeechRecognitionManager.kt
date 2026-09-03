@@ -391,7 +391,7 @@ object SpeechRecognitionManager {
                         RecognitionError.OEM_NO_SERVICE,
                         RecognitionError.TRANSCRIPTION_FAILED,
                         RecognitionError.LANGUAGE_UNSUPPORTED,
-                    ) && callbackEngine.id == "system"
+                    ) && callbackEngine?.id == "system"
                 ) {
                     val providerFallback = engines.firstOrNull {
                         it.id == "provider" && it.isAvailable
