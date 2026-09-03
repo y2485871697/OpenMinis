@@ -509,6 +509,8 @@ private fun liveStreamingDelta(
      * released over display frames instead of appearing as a whole paragraph.
      */
     animateTextBlockId: String? = null,
+    fallbackTarget: StreamingDelta? = null,
+    presentationActive: Boolean = true,
 ): StreamingDelta? {
     val flow = remember(viewModel, messageId) {
         // Publish at most once per display frame. Provider SSE chunks can be
@@ -520,7 +522,7 @@ private fun liveStreamingDelta(
             .sample(16L)
     }
     val target by flow.collectAsState(initial = null)
-    val currentTarget = target ?: return null
+    val currentTarget = target ?: fallbackTarget ?: return null
     if (animateTextBlockId == null) return currentTarget
 
     val targetBlockText = currentTarget.toolBlocks
@@ -535,6 +537,7 @@ private fun liveStreamingDelta(
     // that target in LaunchedEffect's key set (which would cancel/restart the
     // typewriter on every provider chunk).
     val latestTargetText = rememberUpdatedState(targetBlockText)
+    val hasLiveTarget = rememberUpdatedState(target != null)
 
     // Provider reads can contain a whole paragraph after a network pause. The
     // received snapshot is the buffer; this fixed frame-paced loop is the
@@ -542,12 +545,23 @@ private fun liveStreamingDelta(
     // code points every ~32ms instead of speeding up for larger backlogs, so
     // a slow/fast network cannot turn into visible bursts or variable typing
     // speed. A long UI frame is capped to one release, never a catch-up burst.
-    LaunchedEffect(messageId, animateTextBlockId) {
+    LaunchedEffect(messageId, animateTextBlockId, presentationActive) {
         val frameIntervalNs = 32_000_000L
         val codePointsPerFrame = 2
         var previousFrameNs = 0L
         var elapsedNs = 0L
         while (true) {
+            // After transport ends, wait for the side-channel to drain and
+            // stop only after the canonical final snapshot catches up with
+            // the text already painted on screen.
+            val terminalTarget = latestTargetText.value
+            if (!presentationActive &&
+                !hasLiveTarget.value &&
+                terminalTarget.startsWith(displayedText) &&
+                displayedText.length >= terminalTarget.length
+            ) {
+                break
+            }
             withFrameNanos { nowNs ->
                 if (previousFrameNs != 0L) {
                     elapsedNs = (elapsedNs + (nowNs - previousFrameNs))
@@ -4212,14 +4226,32 @@ fun ChatScreen(
                             } // close UserBubble SideEffect + UserMessageBubble block
                             is FlatChatItem.AssistantHeader -> AssistantHeader()
                             is FlatChatItem.AssistantText -> {
-                                // Frozen rows must stay detached from the
-                                // token-rate side channel. Only the active
-                                // streaming row needs live updates.
-                                val liveDelta = if (item.isStreaming) {
+                                // Keep the presenter alive after transport
+                                // ends. The row identity remains stable, so
+                                // its displayed prefix can continue toward
+                                // the canonical final message without a
+                                // full-snapshot jump.
+                                var wasStreaming by remember(item.messageId, item.block.id) {
+                                    mutableStateOf(false)
+                                }
+                                if (item.isStreaming) wasStreaming = true
+                                val shouldPresent = item.isStreaming || wasStreaming
+                                val fallbackTarget = if (shouldPresent) {
+                                    StreamingDelta(
+                                        content = item.messageMarkdown,
+                                        toolBlocks = listOf(item.block),
+                                        isAwaitingModelResponse = false,
+                                    )
+                                } else {
+                                    null
+                                }
+                                val liveDelta = if (shouldPresent) {
                                     liveStreamingDelta(
                                         viewModel,
                                         item.messageId,
                                         animateTextBlockId = item.block.id,
+                                        fallbackTarget = fallbackTarget,
+                                        presentationActive = item.isStreaming,
                                     )
                                 } else {
                                     null
@@ -4237,7 +4269,7 @@ fun ChatScreen(
                                 ) {
                                     LargeContentGuard(
                                         content = liveBlock.content,
-                                        isStreaming = liveDelta != null,
+                                        isStreaming = item.isStreaming,
                                         stableKey = "text:${item.messageId}:${item.block.id}",
                                     ) {
                                         SideEffect {
@@ -4245,7 +4277,7 @@ fun ChatScreen(
                                         }
                                         StreamingMarkdownText(
                                             content = liveBlock.content,
-                                            isStreaming = liveDelta != null,
+                                            isStreaming = item.isStreaming,
                                             shardId = TextShardId(
                                                 messageId = item.messageId,
                                                 shardId = "text:${item.block.id}",
