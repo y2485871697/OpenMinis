@@ -15,7 +15,21 @@ class ProviderBalanceClientTest {
                 "balance_infos[0].total_balance",
             ),
         )
+    
+    @Test
+    fun appendsLeadingSlashEndpointToVersionedBaseUrl() {
+        assertEquals(
+            "https://example.com/v1/usage",
+            ProviderBalanceClient.resolveUrl("https://example.com/v1", "/usage").toString(),
+        )
     }
+
+    @Test
+    fun rejectsHtmlInsteadOfDisplayingDoctypeAsBalance() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ProviderBalanceClient.extractDisplayValue("<!doctype html><html></html>", "remaining")
+        }
+    }}
 
     @Test
     fun preservesStringBalance() {
@@ -24,7 +38,21 @@ class ProviderBalanceClientTest {
             "$12.40",
             ProviderBalanceClient.extractDisplayValue(json, "account.balance"),
         )
+    
+    @Test
+    fun appendsLeadingSlashEndpointToVersionedBaseUrl() {
+        assertEquals(
+            "https://example.com/v1/usage",
+            ProviderBalanceClient.resolveUrl("https://example.com/v1", "/usage").toString(),
+        )
     }
+
+    @Test
+    fun rejectsHtmlInsteadOfDisplayingDoctypeAsBalance() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ProviderBalanceClient.extractDisplayValue("<!doctype html><html></html>", "remaining")
+        }
+    }}
 
     @Test
     fun acceptsBareNumericBalanceWithConfiguredKey() {
@@ -32,7 +60,21 @@ class ProviderBalanceClientTest {
             "9.26",
             ProviderBalanceClient.extractDisplayValue("9.2600", "remaining"),
         )
+    
+    @Test
+    fun appendsLeadingSlashEndpointToVersionedBaseUrl() {
+        assertEquals(
+            "https://example.com/v1/usage",
+            ProviderBalanceClient.resolveUrl("https://example.com/v1", "/usage").toString(),
+        )
     }
+
+    @Test
+    fun rejectsHtmlInsteadOfDisplayingDoctypeAsBalance() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ProviderBalanceClient.extractDisplayValue("<!doctype html><html></html>", "remaining")
+        }
+    }}
 
     @Test
     fun findsNamedBalanceInTopLevelArray() {
@@ -43,7 +85,21 @@ class ProviderBalanceClientTest {
                 "remaining",
             ),
         )
+    
+    @Test
+    fun appendsLeadingSlashEndpointToVersionedBaseUrl() {
+        assertEquals(
+            "https://example.com/v1/usage",
+            ProviderBalanceClient.resolveUrl("https://example.com/v1", "/usage").toString(),
+        )
     }
+
+    @Test
+    fun rejectsHtmlInsteadOfDisplayingDoctypeAsBalance() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ProviderBalanceClient.extractDisplayValue("<!doctype html><html></html>", "remaining")
+        }
+    }}
 
     @Test
     fun acceptsRootPathForBareBalance() {
@@ -51,12 +107,68 @@ class ProviderBalanceClientTest {
             "9.26",
             ProviderBalanceClient.extractDisplayValue("9.2600", "$"),
         )
+    
+    @Test
+    fun appendsLeadingSlashEndpointToVersionedBaseUrl() {
+        assertEquals(
+            "https://example.com/v1/usage",
+            ProviderBalanceClient.resolveUrl("https://example.com/v1", "/usage").toString(),
+        )
     }
+
+    @Test
+    fun rejectsHtmlInsteadOfDisplayingDoctypeAsBalance() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ProviderBalanceClient.extractDisplayValue("<!doctype html><html></html>", "remaining")
+        }
+    }}
 
     @Test
     fun reportsMissingKey() {
         assertThrows(IllegalArgumentException::class.java) {
             ProviderBalanceClient.extractDisplayValue("""{"balance":1}""", "account.balance")
-        }
+        
+    @Test
+    fun appendsLeadingSlashEndpointToVersionedBaseUrl() {
+        assertEquals(
+            "https://example.com/v1/usage",
+            ProviderBalanceClient.resolveUrl("https://example.com/v1", "/usage").toString(),
+        )
     }
-}
+
+    @Test
+    fun rejectsHtmlInsteadOfDisplayingDoctypeAsBalance() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ProviderBalanceClient.extractDisplayValue("<!doctype html><html></html>", "remaining")
+        }
+    }}
+    
+    @Test
+    fun appendsLeadingSlashEndpointToVersionedBaseUrl() {
+        assertEquals(
+            "https://example.com/v1/usage",
+            ProviderBalanceClient.resolveUrl("https://example.com/v1", "/usage").toString(),
+        )
+    }
+
+    @Test
+    fun rejectsHtmlInsteadOfDisplayingDoctypeAsBalance() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ProviderBalanceClient.extractDisplayValue("<!doctype html><html></html>", "remaining")
+        }
+    }}
+
+    @Test
+    fun appendsLeadingSlashEndpointToVersionedBaseUrl() {
+        assertEquals(
+            "https://example.com/v1/usage",
+            ProviderBalanceClient.resolveUrl("https://example.com/v1", "/usage").toString(),
+        )
+    }
+
+    @Test
+    fun rejectsHtmlInsteadOfDisplayingDoctypeAsBalance() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ProviderBalanceClient.extractDisplayValue("<!doctype html><html></html>", "remaining")
+        }
+    }}
