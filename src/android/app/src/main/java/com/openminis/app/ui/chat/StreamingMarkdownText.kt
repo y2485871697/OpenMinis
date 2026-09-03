@@ -564,20 +564,11 @@ private fun StreamingMarkdownTextBody(
 
     ShardSubIndexScope {
         Column(modifier = modifier) {
-            // [T-android-stream-fade] Last block during a live stream gets
-            // LocalAppendOnlyFade=true so MdText fades in newly-appended
-            // word ranges (mirrors iOS TextFadeAnimator). Every other block
-            // — completed prefix, non-streaming sessions — renders opaque.
-            val lastIdx = blocks.size - 1
-            blocks.forEachIndexed { idx, block ->
-                if (isStreaming && idx == lastIdx) {
-                    androidx.compose.runtime.CompositionLocalProvider(
-                        LocalAppendOnlyFade provides true,
-                    ) { RenderBlock(block) }
-                } else {
-                    RenderBlock(block)
-                }
-            }
+            // Render streamed text fully opaque. A markdown tail can change
+            // block shape while delimiters arrive; tying word-fade state to
+            // those transient composition slots repeatedly reset previously
+            // visible words to alpha 0 and made the reply visibly flicker.
+            blocks.forEach { block -> RenderBlock(block) }
         }
     }
 }
@@ -975,16 +966,13 @@ private fun MarkdownBlockBody(
     // iOS-style continuous flow would require token-incremental rendering of the
     // streaming tail, not a height animation on an unstable item.
     Column(modifier = modifier) {
-        // Wrap the last block in LocalAppendOnlyFade=true so MdText fades in
-        // newly-appended words. [T-android-streaming-incremental-inline] Also
-        // flag it as the LIVE tail so its Paragraph inline/math parse goes
-        // through the incremental (frozen-prefix + fresh-suffix) path — this is
-        // the only block whose raw grows every tick.
+        // Keep incremental inline parsing for the live tail, but render it
+        // fully opaque. Word-fade state is not stable when markdown delimiters
+        // re-shape the tail and was causing already-rendered text to flash.
         val lastIdx = blocks.size - 1
         blocks.forEachIndexed { idx, block ->
             if (idx == lastIdx) {
                 androidx.compose.runtime.CompositionLocalProvider(
-                    LocalAppendOnlyFade provides true,
                     LocalLiveIncremental provides true,
                 ) { RenderBlock(block) }
             } else {

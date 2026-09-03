@@ -6503,8 +6503,8 @@ fun ChatScreen(
                                                 com.openminis.app.speech.RecognitionError.LANGUAGE_UNSUPPORTED,
                                                 com.openminis.app.speech.RecognitionError.NETWORK,
                                                 com.openminis.app.speech.RecognitionError.UNKNOWN,
-                                            )
-                                        ) && voiceChoice.isSystem) {
+                                            ) && voiceChoice.isSystem
+                                        ) {
                                             launchSystemDictation(prefix)
                                         } else {
                                             android.widget.Toast.makeText(
