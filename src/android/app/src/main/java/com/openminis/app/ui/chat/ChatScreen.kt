@@ -6509,15 +6509,15 @@ fun ChatScreen(
                         // cold launch / new chat removed (was ec95451a). The
                         // composer now always starts in text mode; voice is only
                         // entered when the user taps the mic button below.
-                        // [T-android-voice-panel] "Read replies" TTS toggle —
-                        // shown only while the voice panel is active (mirrors
-                        // iOS readAloudToolbarToggle, 2-state on Android).
+                        // The composer-level "Read replies" control and its
+                        // automatic stream narration are retired. Per-message
+                        // read-aloud remains available below each AI reply.
                         // [T-android-edit-readreplies-hide] Hidden while message
                         // edit mode is active: the Exit-Edit pill lives in the
                         // same bottom row, and both capsules plus their spacers
                         // overflow the constrained width and render overlapped
                         // (iOS af9f3d3e parity).
-                        if (com.openminis.app.ui.chat.voice.VoiceModePrefs.isVoiceActive && editingId == null) {
+                        if (false && com.openminis.app.ui.chat.voice.VoiceModePrefs.isVoiceActive && editingId == null) {
                             // [T-android-tts-capsule] Source of truth is the
                             // GLOBAL VoiceOutputState (same "readReplies" pref
                             // key as before), shared with the floating
