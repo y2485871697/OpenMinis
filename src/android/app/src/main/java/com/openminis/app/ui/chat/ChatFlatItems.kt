@@ -335,15 +335,21 @@ internal sealed class FlatChatItem {
             if (this === other) return true
             if (other !is AssistantText) return false
             return messageId == other.messageId &&
-                block === other.block &&
                 isStreaming == other.isStreaming &&
-                messageMarkdown.length == other.messageMarkdown.length
+                block.id == other.block.id &&
+                // While streaming, the block body is delivered through the
+                // per-row StateFlow presenter. Keeping the row equal here is
+                // what lets Compose skip the parent LazyColumn item instead
+                // of rebuilding the whole markdown subtree for every SSE
+                // snapshot. Once frozen, compare the canonical markdown so
+                // edits/restored messages still invalidate normally.
+                (isStreaming || messageMarkdown == other.messageMarkdown)
         }
         override fun hashCode(): Int {
             var h = messageId.hashCode()
-            h = h * 31 + System.identityHashCode(block)
+            h = h * 31 + block.id.hashCode()
             h = h * 31 + isStreaming.hashCode()
-            h = h * 31 + messageMarkdown.length
+            if (!isStreaming) h = h * 31 + messageMarkdown.hashCode()
             return h
         }
     }
