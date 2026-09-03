@@ -9,6 +9,8 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.openminis.app.MinisApp
+import com.openminis.app.data.model.ProviderType
+import com.openminis.app.data.model.hasAudioInput
 import com.openminis.app.provider.voice.VoiceInputRequest
 import com.openminis.app.provider.voice.VoiceProvider
 import com.openminis.app.provider.voice.VoiceProviderException
@@ -76,9 +78,11 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
     override val displayName: String = "Provider transcription"
     override val supportsPartialResults: Boolean = false
 
-    /** Cheap check only: is a provider ASR selection resolvable right now? */
+    /** Cheap check only: is a configured or compatible fallback ASR resolvable? */
     override val isAvailable: Boolean
-        get() = !degraded && repository()?.resolveVoiceInputEntry() != null
+        get() = !degraded && repository()?.let { repo ->
+            repo.resolveVoiceInputEntry() != null || fallbackCandidates(repo).isNotEmpty()
+        } == true
 
     /** Cloud ASR is language-agnostic (auto-detect); no fixed locale list. */
     override val supportedLocales: List<Locale> = emptyList()
@@ -165,6 +169,35 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
             ?.takeIf { it.subsystemsReady() }
             ?.providerRepository
 
+    /**
+     * OpenAI-compatible providers expose the standard transcription endpoint
+     * even when their chat-model metadata does not advertise audio input. Use
+     * one visible entry as the provider carrier and let VoiceProvider select
+     * its default `whisper-1` model. This keeps dictation working on OEMs that
+     * ship no embeddable Android RecognitionService.
+     */
+    private fun fallbackCandidates(
+        repo: com.openminis.app.data.repository.ProviderRepository,
+    ): List<Pair<com.openminis.app.data.model.ProviderInstance, com.openminis.app.data.model.ModelEntry>> {
+        val compatibleTypes = setOf(
+            ProviderType.openAI,
+            ProviderType.openAIResponses,
+            ProviderType.openRouter,
+        )
+        val config = repo.config.value
+        return config.instances.asSequence()
+            .filter { it.isEnabled && it.providerType in compatibleTypes }
+            .mapNotNull { instance ->
+                val apiKey = repo.usableApiKey(instance) ?: return@mapNotNull null
+                if (!VoiceProviderFactory.supports(instance, apiKey)) return@mapNotNull null
+                val entry = config.modelEntries.firstOrNull {
+                    it.providerInstanceId == instance.id && !it.isHidden
+                } ?: return@mapNotNull null
+                instance to entry
+            }
+            .toList()
+    }
+
     override fun markDegraded() {
         degraded = true
     }
@@ -181,9 +214,14 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
         // seed per capture so takes spread across members; fallback groups
         // keep declaration order. Provider construction is deferred to the
         // transcription step, where a failing member advances to the next.
-        val candidates = repo?.resolveVoiceInputCandidates(
+        val configuredCandidates = repo?.resolveVoiceInputCandidates(
             loadBalanceSeed = kotlin.random.Random.nextInt(Int.MAX_VALUE),
         ).orEmpty()
+        val candidates = if (repo == null) {
+            emptyList()
+        } else {
+            (configuredCandidates + fallbackCandidates(repo)).distinctBy { it.second.id }
+        }
         if (repo == null || candidates.isEmpty()) {
             dispatchListener(null, listener) {
                 onError(
@@ -308,12 +346,13 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                         continue
                     }
                     try {
+                        val explicitlyVoiceCapable = entry.model.hasAudioInput
                         val response = provider.transcribe(
                             VoiceInputRequest(
                                 audioData = wav,
-                                model = entry.baseModel.id,
+                                model = entry.baseModel.id.takeIf { explicitlyVoiceCapable },
                                 language = locale.toLanguageTag(),
-                                resolvedModel = entry.model,
+                                resolvedModel = entry.model.takeIf { explicitlyVoiceCapable },
                             ),
                         )
                         if (!isCurrent(generation)) return@launch
@@ -629,12 +668,13 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                 continue
             }
             try {
+                val explicitlyVoiceCapable = entry.model.hasAudioInput
                 val response = provider.transcribe(
                     VoiceInputRequest(
                         audioData = wav,
-                        model = entry.baseModel.id,
+                        model = entry.baseModel.id.takeIf { explicitlyVoiceCapable },
                         language = locale.toLanguageTag(),
-                        resolvedModel = entry.model,
+                        resolvedModel = entry.model.takeIf { explicitlyVoiceCapable },
                     ),
                 )
                 if (!isCurrent(generation)) return

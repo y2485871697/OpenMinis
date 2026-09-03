@@ -48,6 +48,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlayCircleFilled
+import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.outlined.BrokenImage
 import androidx.compose.material3.CheckboxDefaults
@@ -1642,8 +1643,10 @@ private fun RenderBlock(block: MdBlock) {
         is MdBlock.CodeBlock -> {
             val clipboardManager = LocalClipboardManager.current
             val context = LocalContext.current
+            val haptic = LocalHapticFeedback.current
             val scope = rememberCoroutineScope()
-            var copied by remember { mutableStateOf(false) }
+            var copied by remember(block.code) { mutableStateOf(false) }
+            var codeScrollEnabled by remember(block.code) { mutableStateOf(false) }
             val fileExtension = remember(block.language) {
                 block.language.lowercase()
                     .filter { it.isLetterOrDigit() }
@@ -1704,6 +1707,25 @@ private fun RenderBlock(block: MdBlock) {
                         )
                     }
                     IconButton(
+                        onClick = { codeScrollEnabled = !codeScrollEnabled },
+                        modifier = Modifier.size(32.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.UnfoldMore,
+                            contentDescription = if (codeScrollEnabled) {
+                                "Disable code block scrolling"
+                            } else {
+                                "Enable code block scrolling"
+                            },
+                            tint = if (codeScrollEnabled) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                            },
+                            modifier = Modifier.size(17.dp),
+                        )
+                    }
+                    IconButton(
                         onClick = {
                                 clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(block.code))
                                 copied = true
@@ -1718,26 +1740,35 @@ private fun RenderBlock(block: MdBlock) {
                         )
                     }
                 }
-                // iOS parity (SelectableMarkdownView.swift L971): cap visual
-                // code-block height at ~400 pt and let an internal scroll
-                // view handle overflow vertically, so a 200-line dump
-                // doesn't push the rest of the message off the bottom of
-                // the chat. Nest scrolls: inner Row owns horizontal scroll
-                // (long lines), outer Box owns vertical scroll + height
-                // cap (long blocks). Compose disallows two scroll modifiers
-                // on the same node, hence the nesting.
+                // One vertical gesture belongs to the chat by default. The
+                // middle toolbar button explicitly enables a capped, pannable
+                // code viewport when the user needs to inspect a long block.
                 val vScroll = rememberScrollState()
                 val hScroll = rememberScrollState()
-                Box(
-                    modifier = Modifier
+                val codeBodyModifier = if (codeScrollEnabled) {
+                    Modifier
                         .fillMaxWidth()
                         .heightIn(max = 400.dp)
                         .verticalScroll(vScroll)
+                } else {
+                    Modifier.fillMaxWidth()
+                }
+                Box(
+                    modifier = codeBodyModifier
                         .padding(bottom = 8.dp),
                 ) {
                     Box(
                         modifier = Modifier
-                            .horizontalScroll(hScroll)
+                            .horizontalScroll(hScroll, enabled = codeScrollEnabled)
+                            .pointerInput(block.code) {
+                                detectTapGestures(
+                                    onLongPress = {
+                                        clipboardManager.setText(AnnotatedString(block.code))
+                                        copied = true
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    },
+                                )
+                            }
                             .padding(horizontal = 12.dp, vertical = 4.dp),
                     ) {
                         Text(

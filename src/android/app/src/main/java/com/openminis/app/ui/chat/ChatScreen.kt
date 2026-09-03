@@ -2973,6 +2973,8 @@ fun ChatScreen(
                         MinisMenu(
                             expanded = showChatMenu,
                             onDismissRequest = { showChatMenu = false },
+                            alignEnd = true,
+                            offset = androidx.compose.ui.unit.DpOffset((-16).dp, 10.dp),
                         ) {
                             val compactMenuItemModifier = Modifier.height(40.dp)
                             val compactMenuItemPadding = PaddingValues(horizontal = 12.dp)
@@ -3689,6 +3691,23 @@ fun ChatScreen(
                     if (originalIndex >= 0) {
                         val displayIndex = flatItems.lastIndex - originalIndex
                         tracedScrollToItem("MESSAGE-SEARCH", displayIndex, 0)
+                        // reverseLayout places offset=0 at the visual bottom.
+                        // Wait for the target row's real size, then move it to
+                        // the viewport top so a search jump has a stable anchor.
+                        withFrameNanos { }
+                        val layout = listState.layoutInfo
+                        val placed = layout.visibleItemsInfo.firstOrNull {
+                            it.index == displayIndex
+                        }
+                        if (placed != null) {
+                            val distanceFromTop = placed.offset - layout.viewportStartOffset
+                            if (distanceFromTop > 1) {
+                                tracedScrollBy(
+                                    "MESSAGE-SEARCH-TOP",
+                                    -distanceFromTop.toFloat(),
+                                )
+                            }
+                        }
                         pendingSearchMessageId = null
                     }
                 }

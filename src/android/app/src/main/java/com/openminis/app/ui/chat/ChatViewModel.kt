@@ -2179,6 +2179,7 @@ class ChatViewModel(
         val transcriptChars = buildConversationTextForSummary(toCompact).length
         val timeoutMs = compactTimeoutMsFor(transcriptChars)
         compactCallsIssued.set(0)
+        compactModelsUsed.clear()
         _compactProgress.value = CompactProgress(
             startedAtMs = System.currentTimeMillis(),
             depth = 0,
@@ -2219,10 +2220,13 @@ class ChatViewModel(
                 }.trim()
                 if (summary.isEmpty()) {
                     withContext(Dispatchers.Main) {
-                        appendSystemInfo("Compaction produced no output — try again later.", "compact")
+                        appendSystemInfo("上下文压缩没有生成摘要，请稍后重试。", "compact")
                     }
                     return@launch
                 }
+                val compactModelLabel = compactModelsUsed.joinToString(" / ")
+                    .ifBlank { provider.model.displayName.ifBlank { provider.model.id } }
+                val storedSummary = storeCompactSummary(summary, compactModelLabel)
 
                 val sid = realSessionId.ifEmpty { sessionId }
                 // v2 marker: lastCompactedMessageId IS the anchor — single
@@ -2281,7 +2285,7 @@ class ChatViewModel(
                 val marker = CompactMarkerEntity(
                     id = java.util.UUID.randomUUID().toString(),
                     sessionId = sid,
-                    summary = summary,
+                    summary = storedSummary,
                     firstKeptSortOrder = Int.MAX_VALUE,   // legacy field; v2 ignores
                     compactedCount = toCompact.size,
                     createdAt = System.currentTimeMillis(),
@@ -2353,7 +2357,7 @@ class ChatViewModel(
                     _messages.value = cleaned
                     AppLogger.info(TAG, "[Compact] divider: $compactedUICount UI bubbles compacted (history entries: ${toCompact.size})")
                     appendSystemInfo(
-                        text = "$compactedUICount messages compacted",
+                        text = "已压缩 $compactedUICount 条消息 · $compactModelLabel",
                         iconKind = "compact",
                         payload = summary,
                     )
@@ -2471,7 +2475,7 @@ class ChatViewModel(
             // Refresh cache to next-most-recent marker (or null).
             val next = chatRepository.dao.latestCompactMarker(sid)
             _cachedLatestMarker = next
-            _compactSummary.value = next?.summary
+            _compactSummary.value = next?.summary?.let(::compactSummaryText)
 
             // Rebuild UI from DB so the previous marker's divider re-emerges
             // (or all dividers vanish if there are no remaining markers).
@@ -3210,14 +3214,12 @@ class ChatViewModel(
         // turn in the transcript said — producing a single-line continuation
         // instead of a structured summary.
         val userMessage = buildString {
-            append("Compact this conversation into a context summary:\n\n")
+            append("请将以下对话压缩为上下文摘要：\n\n")
             append(conversationText)
-            append("\n\n---\nEND OF CONVERSATION TO COMPACT.\n\n")
+            append("\n\n---\n待压缩对话到此结束。\n\n")
             append(
-                "Now generate a structured context summary following the system prompt " +
-                    "instructions. Do NOT continue the conversation above — summarize it. " +
-                    "Write everything in past tense, framed as \"what was discussed / what " +
-                    "was done\", NOT as an ongoing goal or todo list."
+                "请严格按照系统提示生成结构化上下文摘要。不要继续回答上面的对话，只做摘要。" +
+                    "所有事件使用过去时，描述已经讨论和已经完成的内容，不要写成仍在进行的目标或待办事项。"
             )
         }
         val providers = buildList {
@@ -3255,7 +3257,12 @@ class ChatViewModel(
                     tools = emptyList(),
                     thinkingLevel = ThinkingLevel.OFF,
                 )
-                if (response.text.isNotBlank()) return response.text
+                if (response.text.isNotBlank()) {
+                    compactModelsUsed.add(
+                        provider.model.displayName.ifBlank { provider.model.id },
+                    )
+                    return response.text
+                }
                 lastError = IllegalStateException("Compaction model returned an empty response")
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
@@ -3562,26 +3569,42 @@ class ChatViewModel(
      * System prompt for the single-shot summarisation call. Matches iOS
      * wording so cross-device summaries stay stylistically aligned.
      */
+    private val compactModelsUsed = linkedSetOf<String>()
+    private val compactModelHeader = "MINIS_COMPACTION_MODEL:"
+
+    private fun storeCompactSummary(summary: String, modelName: String): String =
+        "$compactModelHeader${modelName.replace('\n', ' ').trim()}\n$summary"
+
+    private fun compactSummaryModel(stored: String): String? =
+        stored.lineSequence().firstOrNull()
+            ?.takeIf { it.startsWith(compactModelHeader) }
+            ?.removePrefix(compactModelHeader)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+
+    private fun compactSummaryText(stored: String): String =
+        if (stored.startsWith(compactModelHeader)) stored.substringAfter('\n', "") else stored
+
     private val compactSummarySystemPrompt: String = """
-        You are a context compaction engine. Your summary will REPLACE the original messages in the conversation context window. The agent will read your summary as past context, then proceed based on the user's NEXT message — your summary is background, not a standing work order. Write the summary in the same language the user used in the conversation.
+        你是上下文压缩引擎。你的摘要将替换对话上下文窗口中的原始消息。助手会把摘要当作已经发生的背景，然后根据用户的下一条消息继续；摘要不是持续执行的工作指令。摘要应使用用户在对话中使用的语言。
 
-        MUST PRESERVE (never omit or shorten):
-        - All file paths, directory names, URLs, UUIDs, and identifiers — copy verbatim
-        - Commands executed and their outcomes (success/failure/output)
-        - What was requested and what was done (record as past events, not as ongoing goals)
-        - Key decisions made and their rationale
-        - Errors encountered and how they were resolved
-        - Important constraints, rules, or user preferences mentioned
-        - Any tool calls and their results that affect current state
+        必须完整保留，不能省略或缩写：
+        - 所有文件路径、目录名、URL、UUID 和标识符，必须原样复制
+        - 已执行的命令及其结果，包括成功、失败和关键输出
+        - 用户提出的要求和已经完成的工作，必须记录为过去发生的事件
+        - 关键决定及其理由
+        - 遇到的错误及其解决方式
+        - 用户提到的重要约束、规则和偏好
+        - 会影响当前状态的工具调用及其结果
 
-        STRUCTURE:
-        1. Start with a one-line description of what the conversation was about (use past tense — "User asked X, agent did Y", NOT "Goal: X").
-        2. Then a concise narrative of what happened, preserving technical details.
-        3. End with a "What had been done so far" section listing completed work — NOT a "todo" or "pending" list. Do not invent ongoing objectives or carry-over tasks from old turns; if the user wants to continue, they will say so in their next message.
+        结构：
+        1. 第一行用过去时概述这段对话讨论了什么，例如“用户要求 X，助手完成了 Y”，不要写成“目标：X”。
+        2. 随后简洁叙述发生过的事情，同时保留技术细节。
+        3. 最后用“目前已完成”小节列出已经完成的工作。不要写待办或未完成列表，也不要自行延续旧任务；用户如果要继续会在下一条消息中说明。
 
-        PRIORITIZE recent context over older history — recent decisions and recent file/path references are most useful for continuity.
+        优先保留近期上下文，因为近期决定以及最近涉及的文件和路径对后续最有帮助。
 
-        Do NOT translate or alter code snippets, file paths, identifiers, or error messages. Be concise but never lose information the agent needs.
+        不要翻译或改写代码片段、文件路径、标识符和错误消息。内容要精炼，但不能丢失后续处理所需的信息。
     """.trimIndent()
 
     // T203 part 2: these MUST be declared before `init { loadSession() }` below.
@@ -4241,7 +4264,7 @@ class ChatViewModel(
             val marker = runCatching { chatRepository.dao.latestCompactMarker(sessionId) }
                 .onFailure { Log.w(TAG, "latestCompactMarker failed: ${it.message}") }
                 .getOrNull()
-            _compactSummary.value = marker?.summary
+            _compactSummary.value = marker?.summary?.let(::compactSummaryText)
             _cachedLatestMarker = marker
 
             com.openminis.app.diagnostics.PerfLongCtx.step(
@@ -4560,7 +4583,7 @@ class ChatViewModel(
             // (loadSession) sets _cachedLatestMarker = marker BEFORE
             // calling us, so overwrite with the healed one now.
             _cachedLatestMarker = healedMarker
-            _compactSummary.value = healedMarker.summary
+            _compactSummary.value = compactSummaryText(healedMarker.summary)
         }
 
         // ─── Apply graying ────────────────────────────────────────────
@@ -4585,14 +4608,17 @@ class ChatViewModel(
         // appear as their own UI bubble).
         val compactedUICount = (0 until insertIdx.coerceIn(0, grayed.size))
             .count { grayed[it].role != "system" }
-        val dividerLabel = "$compactedUICount messages compacted"
         val markerForDivider = healedMarker ?: marker
+        val dividerLabel = buildString {
+            append("已压缩 $compactedUICount 条消息")
+            compactSummaryModel(markerForDivider.summary)?.let { append(" · $it") }
+        }
         val dividerBlock = AssistantBlock(
             id = "compact-divider-${markerForDivider.id}",
             kind = "info",
             content = dividerLabel,
             toolName = "compact",
-            toolArgs = markerForDivider.summary,
+            toolArgs = compactSummaryText(markerForDivider.summary),
         )
         val dividerMsg = ChatMessage(
             id = "compact-divider-msg-${markerForDivider.id}",
