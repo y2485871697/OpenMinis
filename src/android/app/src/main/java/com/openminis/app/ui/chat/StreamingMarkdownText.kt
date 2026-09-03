@@ -562,7 +562,7 @@ private fun StreamingMarkdownTextBody(
         snapshotFlow { latestContent }
             .distinctUntilChanged()
             .conflate()
-            .map { snapshot -> parseMarkdownBlocks(snapshot) }
+            .map { snapshot -> parseStreamingMarkdownBlocks(snapshot, mdColors) }
             .flowOn(Dispatchers.Default)
             .catch { error ->
                 if (error is kotlinx.coroutines.CancellationException) throw error
@@ -937,7 +937,7 @@ private fun MarkdownBlockBody(
         snapshotFlow { latestText }
             .distinctUntilChanged()
             .conflate()
-            .map { snapshot -> parseMarkdownBlocks(snapshot) }
+            .map { snapshot -> parseStreamingMarkdownBlocks(snapshot, mdColors) }
             .flowOn(Dispatchers.Default)
             .catch { error ->
                 if (error is kotlinx.coroutines.CancellationException) throw error
@@ -998,6 +998,40 @@ internal fun rememberMarkdownPrewarmer(): (List<String>) -> Unit {
  */
 private fun parseMarkdownBlocksBlocking(content: String): List<MdBlock> =
     kotlinx.coroutines.runBlocking { parseMarkdownBlocks(content) }
+
+/**
+ * Parse a live document by stable markdown fragments. Everything before the
+ * final fragment is immutable after its boundary is closed and is therefore a
+ * process-wide cache hit on subsequent stream ticks. Only the active tail is
+ * parsed from scratch. This keeps the cost proportional to the current
+ * paragraph/code fence instead of the entire accumulated assistant reply.
+ */
+private suspend fun parseStreamingMarkdownBlocks(
+    content: String,
+    colors: MdColors,
+): List<MdBlock> {
+    val fragments = splitMarkdownIntoBlockTexts(content)
+    if (fragments.isEmpty()) return emptyList()
+    val lastIndex = fragments.lastIndex
+    val result = ArrayList<MdBlock>()
+    fragments.forEachIndexed { index, fragment ->
+        val parsed = if (index == lastIndex) {
+            parseMarkdownBlocks(fragment)
+        } else {
+            MarkdownParseCaches.blocks(fragment)
+        }
+        if (index == lastIndex) {
+            // Freeze-edge handoff: when this fragment becomes history, the
+            // following tick can reuse the exact AST without another parse.
+            MarkdownParseCaches.putBlocks(fragment, parsed)
+            MarkdownParseCaches.prewarmLiveTail(parsed, colors)
+        } else {
+            MarkdownParseCaches.prewarm(parsed, colors)
+        }
+        result.addAll(parsed)
+    }
+    return result
+}
 
 // ─── Block model ────────────────────────────────────────────────────────────
 
