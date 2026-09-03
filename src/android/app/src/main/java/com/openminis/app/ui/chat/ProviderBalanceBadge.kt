@@ -2,14 +2,17 @@ package com.openminis.app.ui.chat
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.openminis.app.R
 
 /** Small, neutral balance indicator shared by the chat title and model picker. */
 @Composable
@@ -22,10 +25,11 @@ internal fun ProviderBalanceBadge(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        Text(
-            text = "💰",
-            fontSize = 10.sp,
-            lineHeight = 12.sp,
+        Icon(
+            painter = painterResource(R.drawable.ic_money_bag),
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(12.dp),
         )
         Text(
             text = value,

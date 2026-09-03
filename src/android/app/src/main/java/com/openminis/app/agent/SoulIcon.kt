@@ -2,6 +2,10 @@ package com.openminis.app.agent
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.BitmapShader
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Shader
 import android.util.Base64
 import java.io.ByteArrayOutputStream
 
@@ -50,7 +54,7 @@ object SoulIcon {
     }
 
     /**
-     * Normalize a picked bitmap into the stored form: centre-cropped to 1:1,
+     * Normalize a picked bitmap into the stored form: centre-cropped with a circular mask,
      * downscaled to [STORED_PIXELS], PNG, base64 data URI.
      *
      * **Opaque images are accepted.** An earlier version refused anything
@@ -70,14 +74,14 @@ object SoulIcon {
             return EncodeResult.Failure(Rejection.UNREADABLE)
         }
 
-        val square = squareCropped(source)
+        val circle = circularCropped(source)
         // Never upscale: a 48px source stays 48px rather than being blown up
         // to 96 and looking soft.
-        val side = minOf(STORED_PIXELS, square.width, square.height)
-        val scaled = if (square.width == side && square.height == side) {
-            square
+        val side = minOf(STORED_PIXELS, circle.width, circle.height)
+        val scaled = if (circle.width == side && circle.height == side) {
+            circle
         } else {
-            Bitmap.createScaledBitmap(square, side, side, true)
+            Bitmap.createScaledBitmap(circle, side, side, true)
         }
 
         val png = ByteArrayOutputStream().use { out ->
@@ -208,6 +212,21 @@ object SoulIcon {
         return c == r || c.path.startsWith(r.path + java.io.File.separator)
     }
 
+    /** Centre-crop and mask the result to a true circle with transparent corners. */
+    private fun circularCropped(bitmap: Bitmap): Bitmap {
+        val square = squareCropped(bitmap)
+        val output = Bitmap.createBitmap(square.width, square.height, Bitmap.Config.ARGB_8888)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = BitmapShader(square, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+        }
+        Canvas(output).drawCircle(
+            square.width / 2f,
+            square.height / 2f,
+            minOf(square.width, square.height) / 2f,
+            paint,
+        )
+        return output
+    }
     /** Centre-crop to 1:1, keeping the shorter edge. */
     private fun squareCropped(bitmap: Bitmap): Bitmap {
         val w = bitmap.width

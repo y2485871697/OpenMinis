@@ -1,6 +1,6 @@
 package com.openminis.app.ui.settings
 
-import android.graphics.BitmapFactory
+import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -128,9 +128,9 @@ fun SoulSettingsScreen(
     // snapshot compared by value cannot drift out of sync with the fields.
     var baseline by remember { mutableStateOf<SoulFile?>(null) }
 
-    // [T-android-soul-custom-icon] Image import: decode → reject opaque →
-    // centre-crop → 96px → PNG → base64 data URI. Runs off the main thread
-    // because a full-resolution camera photo is expensive to decode and scan.
+    // Decode the picked image first, then let the user position it inside a
+    // circular crop. Encoding happens only after the crop is confirmed.
+    var pendingCropBitmap by remember { mutableStateOf<Bitmap?>(null) }
     val iconUnreadableMsg = stringResource(R.string.soul_icon_error_unreadable)
     val iconTooLargeMsg = stringResource(R.string.soul_icon_error_too_large)
     val imagePicker = rememberLauncherForActivityResult(
@@ -138,28 +138,14 @@ fun SoulSettingsScreen(
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                val bmp = runCatching {
-                    context.contentResolver.openInputStream(uri)?.use {
-                        BitmapFactory.decodeStream(it)
-                    }
-                }.getOrNull()
-                if (bmp == null) {
-                    SoulIcon.EncodeResult.Failure(SoulIcon.Rejection.UNREADABLE)
-                } else {
-                    SoulIcon.encode(bmp)
-                }
-            }
-            when (result) {
-                is SoulIcon.EncodeResult.Success -> icon = result.dataUri
-                is SoulIcon.EncodeResult.Failure -> iconError = when (result.reason) {
-                    SoulIcon.Rejection.TOO_LARGE -> iconTooLargeMsg
-                    SoulIcon.Rejection.UNREADABLE -> iconUnreadableMsg
-                }
+            val bitmap = withContext(Dispatchers.IO) { decodeAvatarBitmap(context, uri) }
+            if (bitmap == null) {
+                iconError = iconUnreadableMsg
+            } else {
+                pendingCropBitmap = bitmap
             }
         }
     }
-
     // Initial load + (defensive) ensureExists. The Application-level call
     // already seeded on first run, but loading from a freshly cleared app
     // shouldn't crash.
@@ -492,6 +478,24 @@ fun SoulSettingsScreen(
         )
     }
 
+    pendingCropBitmap?.let { source ->
+        AvatarCropScreen(
+            bitmap = source,
+            onCancel = { pendingCropBitmap = null },
+            onConfirm = { cropped ->
+                pendingCropBitmap = null
+                scope.launch {
+                    when (val result = withContext(Dispatchers.IO) { SoulIcon.encode(cropped) }) {
+                        is SoulIcon.EncodeResult.Success -> icon = result.dataUri
+                        is SoulIcon.EncodeResult.Failure -> iconError = when (result.reason) {
+                            SoulIcon.Rejection.TOO_LARGE -> iconTooLargeMsg
+                            SoulIcon.Rejection.UNREADABLE -> iconUnreadableMsg
+                        }
+                    }
+                }
+            },
+        )
+    }
     if (showEmojiSheet) {
         SoulEmojiPickerSheet(
             current = if (SoulIcon.isDataUri(icon)) "" else icon,
@@ -518,17 +522,13 @@ internal fun SoulIconGlyph(
 ) {
     val bitmap = remember(icon) { SoulIcon.decode(icon) }
     when {
-        // Rounded rectangle, NOT a circle: at 18dp in the chat header a circle
-        // eats the corners of a small avatar. Clipping here is also what makes
-        // an opaque image acceptable at all — the refusal that used to guard
-        // against "opaque rectangle reads as a broken tile" was a presentation
-        // concern, and this is the presentation fix.
+        // Assistant photos use the same circular presentation everywhere.
         bitmap != null -> Image(
             bitmap = bitmap.asImageBitmap(),
             contentDescription = null,
             modifier = Modifier
                 .size(sizeDp)
-                .clip(RoundedCornerShape(sizeDp * SoulIcon.CORNER_RADIUS_FRACTION)),
+                .clip(CircleShape),
         )
         icon.isNotEmpty() -> Text(text = icon, fontSize = emojiSp)
         // Unset: byte-for-byte the previous sparkle, so a user who never

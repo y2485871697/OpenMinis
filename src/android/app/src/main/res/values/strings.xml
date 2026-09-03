@@ -303,7 +303,7 @@
     <string name="soul_save_error_title">Couldn\'t save</string>
     <string name="soul_icon_choose_emoji">Choose Emoji</string>
     <string name="soul_icon_choose_image">Choose Image</string>
-    <string name="soul_icon_image_hint">Cropped to a square and rounded</string>
+    <string name="soul_icon_image_hint">Choose, then crop to a circle</string>
     <string name="soul_icon_use_default">Use Default</string>
     <string name="soul_icon_emoji_title">Identity icon</string>
     <string name="soul_icon_emoji_field">Or type an emoji</string>
@@ -1969,4 +1969,7 @@
     <string name="assistant_delete_title">Delete assistant?</string>
     <string name="assistant_delete_body">Delete %1$s? This cannot be undone.</string>
     <string name="assistant_copy_name">%1$s Copy</string>
+    <string name="soul_crop_title">Crop</string>
+    <string name="soul_crop_cancel">Cancel crop</string>
+    <string name="soul_crop_confirm">Use crop</string>
 </resources>
