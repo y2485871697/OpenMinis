@@ -496,6 +496,44 @@ private fun sameStreamingLayout(
     return true
 }
 
+/**
+ * Return the tool blocks visible to the floating tool bar without allocating
+ * a copied ChatMessage list for every streaming snapshot. The old path called
+ * mergeStreamingOverlay() from a Main dispatcher collector; that copied every
+ * message (and its attachment lists) for each SSE fragment even when the
+ * active reply was ordinary text.
+ */
+private fun toolBlocksForFloatingBar(
+    messages: List<ChatMessage>,
+    streaming: Map<String, StreamingDelta>,
+): List<AssistantBlock> {
+    if (messages.isEmpty() && streaming.isEmpty()) return emptyList()
+    val result = ArrayList<AssistantBlock>()
+    val seen = HashSet<String>(streaming.size)
+    for (message in messages) {
+        if (message.role != "assistant") continue
+        val delta = streaming[message.id]
+        val blocks = delta?.toolBlocks ?: message.toolBlocks
+        if (delta != null) seen += message.id
+        for (block in blocks) {
+            if (block.toolStatus != null && block.kind != "thinking" && block.kind != "info") {
+                result += block
+            }
+        }
+    }
+    // Defensive fallback for a transient side-channel entry whose canonical
+    // message has not been published yet.
+    for ((messageId, delta) in streaming) {
+        if (messageId in seen) continue
+        for (block in delta.toolBlocks) {
+            if (block.toolStatus != null && block.kind != "thinking" && block.kind != "info") {
+                result += block
+            }
+        }
+    }
+    return result
+}
+
 @OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
 private fun liveStreamingDelta(
@@ -3349,10 +3387,13 @@ fun ChatScreen(
                         kotlinx.coroutines.flow.flowOf(messages),
                         viewModel.streamingById,
                     ) { msgs, stream ->
-                        val merged = if (stream.isEmpty()) msgs
-                                     else mergeStreamingOverlay(msgs, stream)
-                        merged.any { msg ->
-                            msg.role == "assistant" && msg.toolBlocks.any { tb ->
+                        msgs.any { msg ->
+                            msg.role == "assistant" && msg.id !in stream &&
+                                msg.toolBlocks.any { tb ->
+                                    tb.toolStatus != null && tb.kind != "thinking" && tb.kind != "info"
+                                }
+                        } || stream.values.any { delta ->
+                            delta.toolBlocks.any { tb ->
                                 tb.toolStatus != null && tb.kind != "thinking" && tb.kind != "info"
                             }
                         }
@@ -4670,10 +4711,7 @@ fun ChatScreen(
                         kotlinx.coroutines.flow.flowOf(messages),
                         viewModel.streamingById,
                     ) { msgs, stream ->
-                        val merged = if (stream.isEmpty()) msgs else mergeStreamingOverlay(msgs, stream)
-                        merged.filter { it.role == "assistant" }
-                            .flatMap { it.toolBlocks }
-                            .filter { it.toolStatus != null && it.kind != "thinking" && it.kind != "info" }
+                        toolBlocksForFloatingBar(msgs, stream)
                     }.collect { lastToolBlocks = it }
                 }
                 val allToolBlocks = lastToolBlocks
