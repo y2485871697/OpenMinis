@@ -84,6 +84,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
@@ -106,6 +108,7 @@ class ChatViewModel(
         internal const val TAG = "ChatViewModel"
         private const val STREAM_REVEAL_INTERVAL_MS = 24L
         private const val STREAM_REVEAL_CODE_POINTS_PER_TICK = 2
+        private const val STREAM_REVEAL_DRAIN_TIMEOUT_MS = 30_000L
 
         // ── [T-android-compact-runaway] Compaction budgets ──────────────
         //
@@ -10213,6 +10216,27 @@ class ChatViewModel(
      * exception/cancellation tail for send, retry, rerun, resume and queue drain.
      */
     private suspend fun drainStreamingSideChannelAfterLoop() {
+        // A normal provider completion must let the paced reveal finish. The
+        // old unconditional flush here replaced the live overlay with the
+        // complete response in one frame, which is exactly the "sudden burst"
+        // seen when the final SSE chunk arrived. Cancellation and failure still
+        // drain synchronously so cleanup remains deterministic.
+        if (currentCoroutineContext().isActive) {
+            val revealJobs = withContext(Dispatchers.Main) {
+                streamFlushStates.values
+                    .mapNotNull { state ->
+                        state.revealJob?.takeIf { state.finishAfterDrain }
+                    }
+                    .distinct()
+            }
+            if (revealJobs.isNotEmpty()) {
+                runCatching {
+                    withTimeout(STREAM_REVEAL_DRAIN_TIMEOUT_MS) {
+                        revealJobs.joinAll()
+                    }
+                }
+            }
+        }
         withContext(NonCancellable + Dispatchers.Main) {
             flushAllStreamingDeltas()
         }
