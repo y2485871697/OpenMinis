@@ -5,6 +5,7 @@ import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaPlayer
+import android.os.SystemClock
 import android.widget.Toast
 import com.openminis.app.MinisApp
 import com.openminis.app.R
@@ -715,24 +716,60 @@ class ReadAloudPlayer(context: Context) {
             if (!system.isSpeaking.value) return false
 
             val estimatedMs = estimatedSpeechMs(remaining, speed)
-            val started = System.currentTimeMillis()
+            val started = SystemClock.elapsedRealtime()
             val budgetMs = (remaining.length * 600L + 10_000L).coerceAtMost(180_000L)
             val deadline = started + budgetMs
-            while (system.isSpeaking.value || progressListenerBroken) {
-                val elapsed = System.currentTimeMillis() - started
-                val local = (elapsed.toFloat() / estimatedMs.toFloat()).coerceIn(0f, 0.98f)
+            var audioInactiveSince: Long? = null
+            var observedAudioActive = false
+            while (true) {
+                val now = SystemClock.elapsedRealtime()
+                val elapsed = now - started
+                // Some OEM engines dispatch onDone when synthesis has finished,
+                // before the final buffered audio has left the speaker. Others
+                // never dispatch it at all. AudioManager therefore participates
+                // in the terminal decision; an estimate may advance the bar but
+                // must never declare playback complete on its own.
+                val audioActive = runCatching { audioManager.isMusicActive }
+                    .getOrDefault(false)
+                if (audioActive) observedAudioActive = true
+                val callbackSpeaking = system.isSpeaking.value
+                // Once Android reports an active output route, it is a better
+                // end-of-playback signal than the OEM callback. Before that,
+                // retain the callback through a short engine startup window.
+                val playbackActive = if (observedAudioActive) {
+                    audioActive
+                } else {
+                    callbackSpeaking || audioActive || elapsed < SYSTEM_AUDIO_START_GRACE_MS
+                }
+                if (!playbackActive) {
+                    val since = audioInactiveSince ?: now.also { audioInactiveSince = it }
+                    if (now - since >= SYSTEM_AUDIO_IDLE_DEBOUNCE_MS) break
+                } else {
+                    audioInactiveSince = null
+                }
+
+                // Keep a clearly visible unfinished tail until playback really
+                // becomes inactive. 0.98 looked indistinguishable from a full
+                // bar on a phone-width capsule.
+                val local = (
+                    elapsed.toFloat() / estimatedMs.toFloat()
+                ).coerceIn(0f, ACTIVE_SYSTEM_PROGRESS_CAP)
                 currentSystemFraction = local
                 val overall = (consumedChars + remaining.length * local) / text.length.toFloat()
                 updateCurrentChunkProgress(overall)
                 if (pendingSystemFastForwardMs > 0 || restartSystemForSpeed || _isPaused.value) break
-                if (progressListenerBroken && elapsed >= estimatedMs) break
-                if (!progressListenerBroken && System.currentTimeMillis() > deadline) {
+                if (!progressListenerBroken && now > deadline) {
                     AppLogger.error(
                         TAG,
                         "system TTS completion never reported (len=${remaining.length}, " +
-                            "waited ${budgetMs}ms); switching to estimated progress",
+                            "waited ${budgetMs}ms); switching to audio-activity tracking",
                     )
                     progressListenerBroken = true
+                }
+                if (progressListenerBroken && now > deadline && !audioActive) break
+                if (now > started + SYSTEM_PLAYBACK_HARD_LIMIT_MS) {
+                    AppLogger.error(TAG, "system TTS exceeded hard playback limit; releasing queue")
+                    system.stop()
                     break
                 }
                 delay(POLL_MS)
@@ -765,13 +802,22 @@ class ReadAloudPlayer(context: Context) {
     }
 
     /**
-     * Rough utterance duration for the broken-listener path. Deliberately on
-     * the short side of real speech: overlapping slightly is far less bad than
-     * the multi-second dead air the full budget produced.
+     * Estimate progress only; completion is decided by callbacks/audio state.
+     * Han text is spoken per character and needs substantially more time than
+     * the old 90 ms-per-code-unit estimate. Latin text is better represented
+     * by word count, otherwise spaces and punctuation skew the duration.
      */
-    private fun estimatedSpeechMs(text: String, speed: Float = VoiceOutputState.speed.value): Long =
-        (((text.length * 90L + 400L) / speed.coerceIn(0.5f, 3.0f)).toLong())
-            .coerceIn(300L, 60_000L)
+    private fun estimatedSpeechMs(text: String, speed: Float = VoiceOutputState.speed.value): Long {
+        val hanCount = text.count { it in '\u3400'..'\u4dbf' || it in '\u4e00'..'\u9fff' }
+        val latinWords = LATIN_WORD.findAll(text).count()
+        val punctuationCount = text.count { it in SPEECH_PAUSE_CHARACTERS }
+        val baseMs = 350L +
+            hanCount * 185L +
+            latinWords * 360L +
+            punctuationCount * 90L
+        return (baseMs / speed.coerceIn(0.5f, 3.0f)).toLong()
+            .coerceIn(500L, 180_000L)
+    }
 
     private fun updateCurrentChunkProgress(chunkFraction: Float) {
         val total = _totalChunks.value
@@ -807,5 +853,11 @@ class ReadAloudPlayer(context: Context) {
     companion object {
         private const val TAG = "ReadAloud"
         private const val POLL_MS = 80L
+        private const val ACTIVE_SYSTEM_PROGRESS_CAP = 0.94f
+        private const val SYSTEM_AUDIO_START_GRACE_MS = 1_200L
+        private const val SYSTEM_AUDIO_IDLE_DEBOUNCE_MS = 600L
+        private const val SYSTEM_PLAYBACK_HARD_LIMIT_MS = 10 * 60_000L
+        private val LATIN_WORD = Regex("[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)?")
+        private const val SPEECH_PAUSE_CHARACTERS = ".,!?;:\u3002\uff0c\uff01\uff1f\uff1b\uff1a\n"
     }
 }
