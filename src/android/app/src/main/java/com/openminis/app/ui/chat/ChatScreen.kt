@@ -472,6 +472,40 @@ private fun Modifier.verticalScrollbar(
     )
 })
 
+private fun sameStreamingLayout(
+    previous: Map<String, StreamingDelta>,
+    next: Map<String, StreamingDelta>,
+): Boolean {
+    if (previous.keys != next.keys) return false
+    for ((messageId, oldDelta) in previous) {
+        val newDelta = next[messageId] ?: return false
+        if (oldDelta.isAwaitingModelResponse != newDelta.isAwaitingModelResponse) return false
+        if (oldDelta.content.isEmpty() != newDelta.content.isEmpty()) return false
+        if (oldDelta.toolBlocks.size != newDelta.toolBlocks.size) return false
+        for (index in oldDelta.toolBlocks.indices) {
+            val oldBlock = oldDelta.toolBlocks[index]
+            val newBlock = newDelta.toolBlocks[index]
+            if (oldBlock.id != newBlock.id ||
+                oldBlock.kind != newBlock.kind ||
+                oldBlock.toolStatus != newBlock.toolStatus
+            ) return false
+        }
+    }
+    return true
+}
+
+@Composable
+private fun liveStreamingDelta(
+    viewModel: ChatViewModel,
+    messageId: String,
+): StreamingDelta? {
+    val flow = remember(viewModel, messageId) {
+        viewModel.streamingById.map { it[messageId] }
+    }
+    val delta by flow.collectAsState(initial = null)
+    return delta
+}
+
 @OptIn(ExperimentalMaterial3Api::class, kotlinx.coroutines.FlowPreview::class)
 @Composable
 fun ChatScreen(
@@ -3359,6 +3393,10 @@ fun ChatScreen(
                         kotlinx.coroutines.flow.flowOf(messages),
                         viewModel.streamingById,
                     ) { msgs, stream -> msgs to stream }
+                        .distinctUntilChanged { previous, next ->
+                            previous.first === next.first &&
+                                sameStreamingLayout(previous.second, next.second)
+                        }
                         .collect { (msgs, stream) ->
                             val tickStartNs = System.nanoTime()
                             if (stream.isNotEmpty() && !streamWasActive) {
@@ -4086,30 +4124,36 @@ fun ChatScreen(
                             )
                             } // close UserBubble SideEffect + UserMessageBubble block
                             is FlatChatItem.AssistantHeader -> AssistantHeader()
-                            is FlatChatItem.AssistantText -> BoundsTrackedBlock(
-                                messageId = item.messageId,
-                                slotKey = "text:${item.block.id}",
-                                markdown = item.messageMarkdown,
-                            ) {
-                                // T-android-gc-storm-issue17: collapse oversized frozen
-                                // assistant text before feeding the markdown parser, which
-                                // is the GC-storm hotspot for legacy sessions.
-                                LargeContentGuard(
-                                    content = item.block.content,
-                                    isStreaming = item.isStreaming,
-                                    stableKey = "text:${item.messageId}:${item.block.id}",
+                            is FlatChatItem.AssistantText -> {
+                                val liveDelta = liveStreamingDelta(viewModel, item.messageId)
+                                val liveBlock = liveDelta?.toolBlocks
+                                    ?.firstOrNull { it.id == item.block.id }
+                                    ?: item.block
+                                val liveMarkdown = liveDelta?.content
+                                    ?.takeIf { it.isNotEmpty() }
+                                    ?: item.messageMarkdown
+                                BoundsTrackedBlock(
+                                    messageId = item.messageId,
+                                    slotKey = "text:${item.block.id}",
+                                    markdown = liveMarkdown,
                                 ) {
-                                    SideEffect {
-                                        selectionController.rememberMessageMarkdown(item.messageId, item.messageMarkdown)
+                                    LargeContentGuard(
+                                        content = liveBlock.content,
+                                        isStreaming = item.isStreaming && liveDelta != null,
+                                        stableKey = "text:${item.messageId}:${item.block.id}",
+                                    ) {
+                                        SideEffect {
+                                            selectionController.rememberMessageMarkdown(item.messageId, liveMarkdown)
+                                        }
+                                        StreamingMarkdownText(
+                                            content = liveBlock.content,
+                                            isStreaming = item.isStreaming && liveDelta != null,
+                                            shardId = TextShardId(
+                                                messageId = item.messageId,
+                                                shardId = "text:${item.block.id}",
+                                            ),
+                                        )
                                     }
-                                    StreamingMarkdownText(
-                                        content = item.block.content,
-                                        isStreaming = item.isStreaming,
-                                        shardId = TextShardId(
-                                            messageId = item.messageId,
-                                            shardId = "text:${item.block.id}",
-                                        ),
-                                    )
                                 }
                             }
                             is FlatChatItem.AssistantMarkdownBlock -> BoundsTrackedBlock(
@@ -4136,6 +4180,10 @@ fun ChatScreen(
                                 }
                             }
                             is FlatChatItem.AssistantThinking -> {
+                                val liveDelta = liveStreamingDelta(viewModel, item.messageId)
+                                val liveBlock = liveDelta?.toolBlocks
+                                    ?.firstOrNull { it.id == item.block.id }
+                                    ?: item.block
                                 // T300: hide Deep Thinking block when the user
                                 // currently has thinking turned off — even if
                                 // a forced-reasoning model (e.g. xAI Grok 4.x
@@ -4157,15 +4205,22 @@ fun ChatScreen(
                                     // hooks for auto-collapse, matching iOS
                                     // ThinkingBlockView semantics.
                                     ThinkingBlock(
-                                        block = item.block,
+                                        block = liveBlock,
                                         isStreaming = item.isLastBlockOverall && item.messageIsStreaming,
                                         isLast = item.isLast,
                                     )
                                 }
                             }
-                            is FlatChatItem.AssistantToolUse -> ToolCallPill(
-                                block = item.block,
-                                allToolBlocks = item.allToolBlocks,
+                            is FlatChatItem.AssistantToolUse -> {
+                                val liveDelta = liveStreamingDelta(viewModel, item.messageId)
+                                val liveBlocks = liveDelta?.toolBlocks
+                                    ?.filter { it.kind == "tool_use" }
+                                    ?: item.allToolBlocks
+                                val liveBlock = liveBlocks.firstOrNull { it.id == item.block.id }
+                                    ?: item.block
+                                ToolCallPill(
+                                    block = liveBlock,
+                                    allToolBlocks = liveBlocks,
                                 onRetry = if (item.isLastCancelled && !isStreaming && !canResume) ({ safeMutate { viewModel.retryLast() } }) else null,
                                 // T14: route per-card stop to the global
                                 // cancelStream(). The button only renders
@@ -4197,7 +4252,7 @@ fun ChatScreen(
                                     safeMutate { viewModel.rerunFromToolBlock(item.messageId, item.block.id) }
                                 }) else null,
                                 onCopyDetails = {
-                                    val text = formatToolDetailsForClipboard(item.block)
+                                    val text = formatToolDetailsForClipboard(liveBlock)
                                     val cb = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                                     cb.setPrimaryClip(android.content.ClipData.newPlainText("tool", text))
                                     android.widget.Toast.makeText(
@@ -4207,17 +4262,24 @@ fun ChatScreen(
                                     ).show()
                                 },
                             )
-                            is FlatChatItem.AssistantInfo -> FallbackInfoBlock(
-                                block = item.block,
+                            }
+                            is FlatChatItem.AssistantInfo -> {
+                                val liveDelta = liveStreamingDelta(viewModel, item.messageId)
+                                val liveBlock = liveDelta?.toolBlocks
+                                    ?.firstOrNull { it.id == item.block.id }
+                                    ?: item.block
+                                FallbackInfoBlock(
+                                    block = liveBlock,
                                 // Only the compact-divider info block should
                                 // surface a "Revert Compact" button on its
                                 // detail sheet — other info rows (slash
                                 // notices, fallback notices) have nothing
                                 // to revert.
-                                onRevert = if (item.block.toolName == "compact") {
+                                onRevert = if (liveBlock.toolName == "compact") {
                                     { viewModel.revertCompact() }
                                 } else null,
                             )
+                            }
                             is FlatChatItem.AssistantTyping -> TypingIndicator()
                             is FlatChatItem.AssistantError -> InlineErrorBanner(
                                 error = item.error,

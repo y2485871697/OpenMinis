@@ -647,6 +647,8 @@ internal fun buildFlatChatItems(
         val lastBlockId = blocks.lastOrNull()?.id
         val lastTextIdx = blocks.indexOfLast { it.kind == "text" }
         val hasAnyTextBlock = lastTextIdx >= 0
+        val isLastAssistantTurn = idx == messages.lastIndex ||
+            (idx + 1 until messages.size).all { messages[it].role != "assistant" }
         // Only the last cancelled tool_use in the message gets the Retry button —
         // retryLast() re-runs the whole turn, so one button is enough.
         val lastCancelledToolId = blocks.lastOrNull { it.kind == "tool_use" && it.toolStatus == ToolBlockStatus.CANCELLED }?.id
@@ -656,6 +658,19 @@ internal fun buildFlatChatItems(
                 "text" -> {
                     if (block.content.isNotEmpty()) {
                         val isLastText = index == lastTextIdx
+                        if (isLastAssistantTurn) {
+                            // Keep the current assistant turn as one stable row per
+                            // text run. The row reads live content directly from the
+                            // streaming side-channel, so a text delta never needs to
+                            // rebuild/split the LazyColumn item list.
+                            out.add(dedupe(FlatChatItem.AssistantText(
+                                messageId = message.id,
+                                block = block,
+                                isStreaming = message.isStreaming && isLastText,
+                                messageMarkdown = joinedMarkdown,
+                            )))
+                            return@forEachIndexed
+                        }
                         // Pattern A: split this text block's content into
                         // independent markdown fragments so each becomes its
                         // own LazyColumn item. Frozen prefix fragments are
@@ -701,8 +716,6 @@ internal fun buildFlatChatItems(
                         // which threw ConcurrentModificationException when the
                         // backing list changed under it. A plain index loop
                         // touches no view.
-                        val isLastAssistantTurn = idx == messages.lastIndex ||
-                            (idx + 1 until messages.size).all { messages[it].role != "assistant" }
                         val fragments = if (isLastText && isLastAssistantTurn) {
                             rawFragments
                         } else {

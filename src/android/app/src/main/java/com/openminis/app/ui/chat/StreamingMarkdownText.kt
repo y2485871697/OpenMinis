@@ -555,19 +555,13 @@ private fun StreamingMarkdownTextBody(
     val mdColors = currentMdColors()
     var blocks by remember(mdColors) {
         mutableStateOf(
-            parseMarkdownBlocksBlocking(content).also {
-                MarkdownParseCaches.prewarm(it, mdColors)
-            }
+            parseMarkdownBlocksBlocking(content)
         )
     }
     LaunchedEffect(mdColors) {
         snapshotFlow { latestContent }
             .distinctUntilChanged()
-            .mapLatest { snapshot ->
-                parseMarkdownBlocks(snapshot).also {
-                    MarkdownParseCaches.prewarm(it, mdColors)
-                }
-            }
+            .mapLatest { snapshot -> parseMarkdownBlocks(snapshot) }
             .flowOn(Dispatchers.Default)
             .catch { error ->
                 if (error is kotlinx.coroutines.CancellationException) throw error
@@ -936,19 +930,13 @@ private fun MarkdownBlockBody(
     val mdColors = currentMdColors()
     var blocks by remember(mdColors) {
         mutableStateOf(
-            parseMarkdownBlocksBlocking(rawText).also {
-                MarkdownParseCaches.prewarm(it, mdColors)
-            }
+            parseMarkdownBlocksBlocking(rawText)
         )
     }
     LaunchedEffect(mdColors) {
         snapshotFlow { latestText }
             .distinctUntilChanged()
-            .mapLatest { snapshot ->
-                parseMarkdownBlocks(snapshot).also {
-                    MarkdownParseCaches.prewarm(it, mdColors)
-                }
-            }
+            .mapLatest { snapshot -> parseMarkdownBlocks(snapshot) }
             .flowOn(Dispatchers.Default)
             .catch { error ->
                 if (error is kotlinx.coroutines.CancellationException) throw error
