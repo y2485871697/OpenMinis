@@ -944,7 +944,8 @@ internal fun ModelPickerSheet(
                                         fontWeight = FontWeight.SemiBold,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.weight(1f),
-                                    )                                    balanceStates[instance.id]?.value?.let { balance ->
+                                    )
+                                    balanceStates[instance.id]?.value?.let { balance ->
                                         ProviderBalanceBadge(
                                             value = balance,
                                             modifier = Modifier.widthIn(max = 84.dp),
