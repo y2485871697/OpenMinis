@@ -112,10 +112,6 @@ fun AboutScreen(onBack: () -> Unit) {
             )
         }
 
-        // T122: surface the existing UpdateChecker entry on the About screen.
-        // The composable was already implemented but never wired anywhere, so
-        // users had no way to trigger a check.
-        CheckUpdateSection()
 
         Spacer(Modifier.height(24.dp))
     }

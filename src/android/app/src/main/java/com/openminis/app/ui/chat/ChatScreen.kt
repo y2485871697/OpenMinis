@@ -900,6 +900,10 @@ fun ChatScreen(
     val coroutineScope = rememberCoroutineScope()
 
     var showModelPicker by remember { mutableStateOf(false) }
+    var showAssistantPicker by remember { mutableStateOf(false) }
+    val assistantProfiles by com.openminis.app.agent.AssistantProfileStore.profiles.collectAsState()
+    val activeAssistantId by com.openminis.app.agent.AssistantProfileStore.activeProfileId.collectAsState()
+    val activeAssistantMetadata by com.openminis.app.agent.SoulStore.cachedMetadata.collectAsState()
     // [T-android-modelpicker-stuck-ripple] Interaction source for the navbar
     // model-picker row, owned here so the press can be drained when the picker
     // closes. See the clickable's comment for why the release never arrives on
@@ -6181,6 +6185,15 @@ fun ChatScreen(
                             )
                         }
 
+                        Spacer(modifier = Modifier.width(8.dp))
+                        InputCircleButton(onClick = { showAssistantPicker = true }) {
+                            com.openminis.app.ui.settings.SoulIconGlyph(
+                                icon = activeAssistantMetadata.icon,
+                                sizeDp = 24.dp,
+                                emojiSp = 19.sp,
+                            )
+                        }
+
                         // T187: Exit Edit Mode pill, only while editingMessageId
                         // is non-null. Tap clears the edit flag + composer text
                         // without truncating history. iOS parity:
@@ -6916,6 +6929,22 @@ fun ChatScreen(
                 showThinkingLevelSheet = false
             },
             onDismiss = { showThinkingLevelSheet = false },
+        )
+    }
+
+    if (showAssistantPicker) {
+        AssistantPickerSheet(
+            profiles = assistantProfiles,
+            activeId = activeAssistantId,
+            onSelect = { id ->
+                coroutineScope.launch {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        com.openminis.app.agent.AssistantProfileStore.selectProfile(context, id)
+                    }
+                    showAssistantPicker = false
+                }
+            },
+            onDismiss = { showAssistantPicker = false },
         )
     }
 

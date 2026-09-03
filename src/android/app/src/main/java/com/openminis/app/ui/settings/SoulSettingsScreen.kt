@@ -63,6 +63,7 @@ import com.openminis.app.R
 import com.openminis.app.ui.components.MinisButton
 import com.openminis.app.ui.components.MinisOutlinedButton
 import com.openminis.app.ui.components.MinisTextButton
+import com.openminis.app.agent.AssistantProfileStore
 import com.openminis.app.agent.SoulBodyLimitCheck
 import com.openminis.app.agent.SoulIcon
 import com.openminis.app.agent.SoulFile
@@ -90,7 +91,10 @@ import kotlinx.coroutines.withContext
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SoulSettingsScreen(onBack: () -> Unit) {
+fun SoulSettingsScreen(
+    profileId: String,
+    onBack: () -> Unit,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -159,10 +163,10 @@ fun SoulSettingsScreen(onBack: () -> Unit) {
     // Initial load + (defensive) ensureExists. The Application-level call
     // already seeded on first run, but loading from a freshly cleared app
     // shouldn't crash.
-    LaunchedEffect(Unit) {
+    LaunchedEffect(profileId) {
         val parsed = withContext(Dispatchers.IO) {
-            SoulStore.ensureExists(context)
-            SoulStore.load(context) ?: SoulMDParser.parse(SoulStore.DEFAULT_CONTENT)
+            AssistantProfileStore.loadProfile(context, profileId)
+                ?: SoulMDParser.parse(SoulStore.DEFAULT_CONTENT)
         }
         name = parsed.metadata.name
         preservedEmoji = parsed.metadata.emoji
@@ -211,7 +215,7 @@ fun SoulSettingsScreen(onBack: () -> Unit) {
     val save: () -> Unit = {
         scope.launch {
             try {
-                withContext(Dispatchers.IO) { SoulStore.save(context, currentFile) }
+                withContext(Dispatchers.IO) { AssistantProfileStore.saveProfile(context, profileId, currentFile) }
                 onBack()
             } catch (t: Throwable) {
                 saveError = t.message ?: "save failed"

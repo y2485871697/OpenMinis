@@ -597,6 +597,15 @@ class BackupImporter(
         val destRoot = dest.canonicalFile
         for (file in src.walkTopDown().filter { it.isFile }) {
             val rel = file.relativeTo(src).path.replace(File.separatorChar, '/')
+            if (rel == AppearanceBackup.FILE_NAME) {
+                if (AppearanceBackup.restoreFrom(context, file)) {
+                    report.filesWritten += 1
+                    report.bytesWritten += file.length()
+                } else {
+                    report.unreadable += 1
+                }
+                continue
+            }
             val out = File(dest, rel)
             // Same containment rule as the blob path: `data/memory` names come
             // from inside the package too.
@@ -611,6 +620,7 @@ class BackupImporter(
             report.filesWritten += 1
             report.bytesWritten += file.length()
         }
+        com.openminis.app.agent.AssistantProfileStore.refreshAfterRestore(context)
         return report
     }
 

@@ -1955,4 +1955,8 @@
     <string name="provider_balance_loading">Fetching balance…</string>
     <string name="provider_balance_not_loaded">Balance not loaded</string>
     <string name="provider_balance_error">Unavailable: %1$s</string>
-    <string name="provider_balance_content_description">Account balance</string></resources>
+    <string name="provider_balance_content_description">Account balance</string>    <string name="assistant_profiles_title">Assistants</string>
+    <string name="assistant_add">Add assistant</string>
+    <string name="assistant_picker_title">Select assistant</string>
+    <string name="assistant_active">Current assistant</string>
+</resources>

@@ -59,4 +59,19 @@ class ProviderBalanceClientTest {
             ProviderBalanceClient.extractDisplayValue("""{"balance":1}""", "account.balance")
         }
     }
+
+    @Test
+    fun appendsLeadingSlashEndpointToVersionedBaseUrl() {
+        assertEquals(
+            "https://example.com/v1/usage",
+            ProviderBalanceClient.resolveUrl("https://example.com/v1", "/usage").toString(),
+        )
+    }
+
+    @Test
+    fun rejectsHtmlInsteadOfDisplayingDoctypeAsBalance() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ProviderBalanceClient.extractDisplayValue("<!doctype html><html></html>", "remaining")
+        }
+    }
 }

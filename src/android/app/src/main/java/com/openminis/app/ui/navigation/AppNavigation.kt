@@ -157,8 +157,10 @@ object Routes {
     const val MEMORY = "memory"
     /** [T-mcp-integration-android] MCP Integrations management screen. */
     const val MCP = "mcp"
-    /** [T-soul-md] SOUL.md editor. */
+    /** Assistant profile list and profile editor. */
     const val SOUL = "soul"
+    const val SOUL_DETAIL = "soul_detail/{profileId}"
+    fun soulDetail(profileId: String) = "soul_detail/${android.net.Uri.encode(profileId)}"
     const val MEMORY_FILE_EDIT = "memory_file/{fileName}/{isGlobal}"
     const val PERMISSIONS = "permissions"
     /**
@@ -1304,9 +1306,20 @@ fun AppNavigation(
             }
         }
 
-        // [T-soul-md] SOUL.md editor.
         composable(Routes.SOUL) {
+            com.openminis.app.ui.settings.AssistantProfilesScreen(
+                onBack = { navController.safePopBackStack() },
+                onProfileClick = { id -> navController.safeNavigate(Routes.soulDetail(id)) },
+            )
+        }
+
+        composable(
+            route = Routes.SOUL_DETAIL,
+            arguments = listOf(navArgument("profileId") { type = NavType.StringType }),
+        ) { entry ->
+            val profileId = entry.arguments?.getString("profileId") ?: return@composable
             com.openminis.app.ui.settings.SoulSettingsScreen(
+                profileId = profileId,
                 onBack = { navController.safePopBackStack() },
             )
         }
