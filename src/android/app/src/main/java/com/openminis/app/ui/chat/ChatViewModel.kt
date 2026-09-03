@@ -8237,12 +8237,14 @@ class ChatViewModel(
                             updateAssistantMessage(assistantId, accumulatedText + turnTextSb.toString(), true, allToolBlocks)
                         }
                     }
-                    is LLMStreamChunk.Text -> withContext(NonCancellable + Dispatchers.Main) {
-                        // Serialize chunk acceptance with the UI Stop action. If
-                        // Stop won the Main queue this chunk is not accepted; if
-                        // this block won, cancelStream's drain necessarily sees
-                        // the complete immutable snapshot published below.
-                        if (!_isStreaming.value) return@withContext
+                    is LLMStreamChunk.Text -> run {
+                        // The stream collector already runs on Dispatchers.IO.
+                        // Publishing the StateFlow from that collector lets
+                        // Compose coalesce invalidations at frame boundaries;
+                        // dispatching every token through Main created a FIFO
+                        // of pending UI tasks, which was the source of the
+                        // intermittent mid-stream freeze and catch-up burst.
+                        if (!_isStreaming.value) return@run
                         // [T-android-readaloud-stop-stale] First actual text of
                         // this reply — stop the previous reply's Read Aloud so
                         // old and new audio don't overlap. Deferred to here
@@ -9951,13 +9953,13 @@ class ChatViewModel(
             // RikkaHub publishes the merged message for every provider event.
             // Keep the snapshot immutable and scoped to this message; Compose
             // can then skip every other row while the active row re-renders.
-            _streamingById.value = _streamingById.value + (
-                id to StreamingDelta(
-                    content = content,
-                    toolBlocks = toolBlocks.toList(),
-                    isAwaitingModelResponse = isAwaitingModelResponse,
-                )
+            val snapshot = StreamingDelta(
+                content = content,
+                toolBlocks = toolBlocks.toList(),
+                isAwaitingModelResponse = isAwaitingModelResponse,
+                contentStructureKey = streamingContentStructureKey(content),
             )
+            _streamingById.update { current -> current + (id to snapshot) }
             // [T-android-timeout-while-running] If a transient banner
             // (`message.error`) is still on the canonical assistant message
             // when a fresh streaming event arrives, the banner is stale —
@@ -10082,6 +10084,45 @@ class ChatViewModel(
         withContext(NonCancellable + Dispatchers.Main) {
             flushAllStreamingDeltas()
         }
+    }
+
+    /**
+     * Cheap structural revision for the live markdown row splitter. This is
+     * deliberately not a content hash: scanning for paragraph boundaries and
+     * fenced-code transitions costs linear time once on the stream collector,
+     * while parsing the full markdown AST would repeat the expensive work on
+     * every token. Text appended inside the current paragraph keeps the same
+     * key and is rendered by that row's side-channel subscriber.
+     */
+    private fun streamingContentStructureKey(content: String): Int {
+        var blankLines = 0
+        var fenceLines = 0
+        var lineHasNonWhitespace = false
+        var leadingWhitespace = true
+        var fenceTicks = 0
+        fun finishLine() {
+            if (!lineHasNonWhitespace) blankLines++
+            if (fenceTicks >= 3) fenceLines++
+            lineHasNonWhitespace = false
+            leadingWhitespace = true
+            fenceTicks = 0
+        }
+        for (character in content) {
+            if (character == '\n') {
+                finishLine()
+                continue
+            }
+            if (!character.isWhitespace()) lineHasNonWhitespace = true
+            if (leadingWhitespace) {
+                if (character.isWhitespace()) continue
+                leadingWhitespace = false
+                if (character == '`') fenceTicks = 1
+            } else if (fenceTicks in 1..2 && character == '`') {
+                fenceTicks++
+            }
+        }
+        finishLine()
+        return 31 * blankLines + fenceLines
     }
 
     /**
