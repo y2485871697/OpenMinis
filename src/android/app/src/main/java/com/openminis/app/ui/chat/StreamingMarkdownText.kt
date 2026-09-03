@@ -119,8 +119,10 @@ import com.openminis.app.ui.theme.ChatColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
@@ -532,59 +534,53 @@ fun StreamingMarkdownText(
 ) {
     if (shardId != null) {
         androidx.compose.runtime.CompositionLocalProvider(LocalShardId provides shardId) {
-            StreamingMarkdownTextBody(content, isStreaming, modifier)
+            StreamingMarkdownTextBody(content, modifier)
         }
         return
     }
-    StreamingMarkdownTextBody(content, isStreaming, modifier)
+    StreamingMarkdownTextBody(content, modifier)
 }
 
 @Composable
 private fun StreamingMarkdownTextBody(
     content: String,
-    isStreaming: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    // Parsing a growing snapshot on every synthetic reveal tick makes the
-    // renderer compete with scrolling/layout work. Compose then observes only
-    // the newest parsed snapshot and the reply appears to skip frames. Keep the
-    // live tail as one stable text node; when the stream closes this branch is
-    // replaced once by the fully parsed Markdown below.
-    if (isStreaming) {
-        ShardSubIndexScope {
-            MdText(
-                text = AnnotatedString(content),
-                modifier = modifier,
-            )
-        }
-        return
-    }
-    // Read new snapshots from one stable collector. Keying LaunchedEffect on
-    // every content change used to cancel the in-flight Markdown parse before
-    // it could publish, which is why live replies could stay at one character.
+    // Match RikkaHub's renderer contract: keep one stable collector for the
+    // lifetime of this composable, cancel only superseded parse work, and keep
+    // rendering the last complete AST until the newest one is ready. Streaming
+    // and completed replies use the same renderer, so completion cannot flash
+    // from plain text into a differently laid out Markdown tree.
     val latestContent by rememberUpdatedState(content)
     val mdColors = currentMdColors()
-    var blocks by remember { mutableStateOf<List<MdBlock>>(emptyList()) }
-    LaunchedEffect(isStreaming, mdColors) {
+    var blocks by remember(mdColors) {
+        mutableStateOf(
+            parseMarkdownBlocksBlocking(content).also {
+                MarkdownParseCaches.prewarm(it, mdColors)
+            }
+        )
+    }
+    LaunchedEffect(mdColors) {
         snapshotFlow { latestContent }
             .distinctUntilChanged()
-            .conflate()
-            .collect { snapshot ->
-                val computed = withContext(Dispatchers.Default) {
-                    parseMarkdownBlocks(snapshot).also {
-                        MarkdownParseCaches.prewarm(it, mdColors)
-                    }
+            .mapLatest { snapshot ->
+                parseMarkdownBlocks(snapshot).also {
+                    MarkdownParseCaches.prewarm(it, mdColors)
                 }
-                blocks = computed
             }
+            .flowOn(Dispatchers.Default)
+            .catch { error ->
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                com.openminis.app.logging.AppLogger.warning(
+                    "Markdown",
+                    "stream parse failed: ${error.message}",
+                )
+            }
+            .collect { blocks = it }
     }
 
     ShardSubIndexScope {
         Column(modifier = modifier) {
-            // Render streamed text fully opaque. A markdown tail can change
-            // block shape while delimiters arrive; tying word-fade state to
-            // those transient composition slots repeatedly reset previously
-            // visible words to alpha 0 and made the reply visibly flicker.
             blocks.forEach { block -> RenderBlock(block) }
         }
     }
@@ -932,16 +928,40 @@ private fun MarkdownBlockBody(
         }
         return
     }
-    // The mutable tail is intentionally plain while it grows. Re-running the
-    // block and inline Markdown parsers for every reveal frame caused both
-    // dropped visual frames and brief blank replacements when a paragraph
-    // split changed the fragment identity. Frozen fragments still take the
-    // normal Markdown path above, so formatting settles exactly once without
-    // making live output or chat scrolling wait on a parser.
-    MdText(
-        text = AnnotatedString(rawText),
-        modifier = modifier,
-    )
+    // RikkaHub-style live Markdown state: the old parsed blocks stay mounted
+    // while the newest snapshot parses on Default. mapLatest cancels obsolete
+    // work without ever clearing the visible tree, eliminating the blank/text
+    // swaps that looked like flicker.
+    val latestText by rememberUpdatedState(rawText)
+    val mdColors = currentMdColors()
+    var blocks by remember(mdColors) {
+        mutableStateOf(
+            parseMarkdownBlocksBlocking(rawText).also {
+                MarkdownParseCaches.prewarm(it, mdColors)
+            }
+        )
+    }
+    LaunchedEffect(mdColors) {
+        snapshotFlow { latestText }
+            .distinctUntilChanged()
+            .mapLatest { snapshot ->
+                parseMarkdownBlocks(snapshot).also {
+                    MarkdownParseCaches.prewarm(it, mdColors)
+                }
+            }
+            .flowOn(Dispatchers.Default)
+            .catch { error ->
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                com.openminis.app.logging.AppLogger.warning(
+                    "Markdown",
+                    "live block parse failed: ${error.message}",
+                )
+            }
+            .collect { blocks = it }
+    }
+    Column(modifier = modifier) {
+        blocks.forEach { RenderBlock(it) }
+    }
 }
 
 /**
@@ -959,7 +979,6 @@ private const val LIVE_FRAGMENT_TAIL_CHARS = 3_000
  * preview in the meantime) instead of synchronously in composition. Below
  * it the parse is sub-ms and the placeholder swap would flicker for nothing.
  */
-private const val COLD_PARSE_OFFMAIN_THRESHOLD_CHARS = 2_000
 private const val COLD_PARSE_PREVIEW_CHARS = 4_000
 
 /**

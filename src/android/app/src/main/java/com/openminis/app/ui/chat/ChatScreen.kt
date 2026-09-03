@@ -50,7 +50,6 @@ import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material.icons.automirrored.filled.Article
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
@@ -181,7 +180,6 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -473,20 +471,6 @@ private fun Modifier.verticalScrollbar(
         cornerRadius = androidx.compose.ui.geometry.CornerRadius(widthPx / 2, widthPx / 2),
     )
 })
-
-// [T-android-tool-autoscroll] Combined signal for the streaming auto-follow
-// LaunchedEffect. data class so distinctUntilChanged uses structural equality
-// — any field flip propagates a tick. Per-block (id, kind, status, length)
-// folded into [blockSig] (FNV-1a 64-bit hash) so a RUNNING→SUCCESS flip on a
-// tool block, a new block appearing (id flips), or a kind change all wake the
-// collector even when growth/size/awaiting alone would have stayed equal.
-private data class ScrollFollowKey(
-    val lastIndex: Int,
-    val growth: Long,
-    val toolBlockCount: Int,
-    val awaiting: Boolean,
-    val blockSig: Long,
-)
 
 @OptIn(ExperimentalMaterial3Api::class, kotlinx.coroutines.FlowPreview::class)
 @Composable
@@ -1445,42 +1429,6 @@ fun ChatScreen(
     // visible items' real partial overhang. Indices we've never seen still
     // contribute zero — that's a strict lower bound, so we can only
     // under-show the button, never flash it near an end.
-    val itemSizeByIndex = remember(listState) { mutableStateMapOf<Int, Int>() }
-    LaunchedEffect(listState) {
-        snapshotFlow { listState.layoutInfo.visibleItemsInfo }
-            .collect { vis ->
-                for (it in vis) {
-                    val cached = itemSizeByIndex[it.index]
-                    if (cached == null || cached != it.size) itemSizeByIndex[it.index] = it.size
-                }
-            }
-    }
-    // [T-android-scroll-fab-first-entry] Average observed item size, used to
-    // estimate the height of indices we've never had on-screen. The pure
-    // cache-only approach (b58e9515) was one-sided: belowSum (already-scrolled-
-    // past items, cached) worked, but aboveSum summed indices we hadn't reached
-    // yet, which are NEVER cached at the moment they're off-screen ABOVE — so
-    // aboveSum stayed 0 forever and the up-button never appeared (logged:
-    // aboveSum=0 across an entire top-scroll, even with all 68 items eventually
-    // cached). Estimating unknown indices by the running average makes BOTH
-    // ends symmetric and direction-independent. The average is a real measured
-    // mean (not a wild min/avg-of-visible extrapolation that the commit comment
-    // warned against), so it tracks actual pixel distance closely enough for a
-    // one-viewport threshold.
-    val avgItemSize = remember(listState, itemSizeByIndex) {
-        derivedStateOf {
-            val sizes = itemSizeByIndex.values
-            if (sizes.isEmpty()) 0 else sizes.sum() / sizes.size
-        }
-    }
-    // [T-android-scrollbtn-turn-walk] The isFarFromTop / isFarFromBottom pair
-    // that used to live here is gone, mirroring iOS dcdec3c5: the up-button's
-    // visibility is now the shared `!isNearBottom` condition, so the separate
-    // one-viewport-from-both-ends estimation has no remaining consumer.
-    // `itemSizeByIndex` / `avgItemSize` above are deliberately KEPT — the
-    // streaming glide (LE(streaming-content)) still uses the running average to
-    // size its per-frame steps.
-
     // T138 phase 2 v3: separate "user scrolled away" intent from listState
     // position. isNearBottom flips false during the transient window where
     // new items are inserted at index 0 but listState still anchors on the
@@ -1963,164 +1911,24 @@ fun ChatScreen(
         userScrolledAway = false
         tracedScrollToItem("LE(messages.size)USER-SEND-SNAP", 0, 0)
     }
-    // T128: streaming auto-follow when the user is at the bottom.
-    //
-    // T120 removed all per-token scroll calls assuming reverseLayout
-    // would keep the bottom pinned natively. That's true for *new
-    // LazyList items*, but a streaming text block grows by appending
-    // characters into the same index-0 message item — its height
-    // increases while LazyListState keeps firstVisibleItemIndex=0
-    // and offset=0, so the new tokens push out below the viewport
-    // (and behind the floating tool thumbnail). Result: users at the
-    // bottom watched the FAB pop up, tapped it, and immediately had
-    // to tap again as the next chunk landed.
-    //
-    // T170: align with iOS three-stage pin (initial scroll → wait for
-    // layoutIfNeeded → re-pin to catch async self-sizing). After
-    // scrollToItem(0) we await one frame then re-pin, which catches the
-    // common case of a tool-pill + typing indicator inserted in the same
-    // recomposition: the first scroll pins to the pre-grow position, the
-    // second pin captures the post-self-sizing height. Suppressed when
-    // the user is currently dragging — never compete with active touch.
-    // T256: streaming auto-follow via snapshotFlow + conflate + sample.
-    // Replaces the per-token `LaunchedEffect(lastAssistantStreamingKey)`
-    // that pegged the Pixel 4a UI thread (95p frame 77ms / 29% janky) by
-    // restarting the entire 3-stage scroll dance on every token. The new
-    // pipeline:
-    //   1. snapshotFlow emits a tuple per recomposition rather than the
-    //      raw content string — content-length comparison is cheap.
-    //   2. conflate() drops intermediate ticks the collector never saw.
-    //   3. sample(150L) caps follow rate to ~6.5 Hz, matching iOS's
-    //      80ms scroll-coalesce + 100ms layout-flush combined gate.
-    // Stage 2 (frame settle) and stage 3 (220ms offset clip) move into a
-    // separate edge-triggered LE that fires once per stream END, not per
-    // token — async self-sizing / image height settling needs the safety
-    // net but not at 50ms cadence.
+    // RikkaHub-style stream follow. Layout changes are the source of truth:
+    // when the newest row grows and the user was already following, request a
+    // new bottom layout. There is no sampling, catch-up animation or per-frame
+    // scroll loop, so rendering work cannot queue behind scroll work.
     LaunchedEffect(listState, userScrolledAway) {
-        // T-streaming-side-channel: combine the canonical messages flow
-        // with streamingById so growth signals (content length, toolBlocks
-        // count, awaiting flag) reflect the live stream — otherwise the
-        // auto-follow scroll-to-bottom stops firing during a turn because
-        // messages no longer ticks per token.
-        kotlinx.coroutines.flow.combine(
-            snapshotFlow { messages },
-            viewModel.streamingById,
-        ) { msgs, stream ->
-            val effective = if (stream.isEmpty()) msgs else mergeStreamingOverlay(msgs, stream)
-            val m = effective.lastOrNull { it.role == "assistant" } ?: return@combine null
-            // [T-android-tool-autoscroll] Trigger tuple includes a per-block
-            // signature (FNV-1a hash over id/kind/status/length) so the
-            // collector wakes on RUNNING→SUCCESS transitions, new-block
-            // appearances, kind flips, and per-token content growth alike.
-            // Without blockSig the previous (lastIdx, growth, size, awaiting)
-            // tuple missed several mid-loop transitions and the auto-follow
-            // skipped scroll ticks during tool swaps.
-            var growth: Long = m.content.length.toLong()
-            var blockSig: Long = 1469598103934665603L // FNV-1a 64-bit offset basis
-            for (b in m.toolBlocks) {
-                growth += b.content.length.toLong()
-                blockSig = blockSig xor b.id.hashCode().toLong()
-                blockSig *= 1099511628211L
-                blockSig = blockSig xor b.kind.hashCode().toLong()
-                blockSig *= 1099511628211L
-                blockSig = blockSig xor (b.toolStatus?.ordinal?.toLong() ?: -1L)
-                blockSig *= 1099511628211L
-                blockSig = blockSig xor b.content.length.toLong()
-                blockSig *= 1099511628211L
+        snapshotFlow {
+            val info = listState.layoutInfo
+            info.visibleItemsInfo.map { item ->
+                Triple(item.index, item.offset, item.size)
             }
-            ScrollFollowKey(
-                lastIndex = effective.lastIndex,
-                growth = growth,
-                toolBlockCount = m.toolBlocks.size,
-                awaiting = m.isAwaitingModelResponse,
-                blockSig = blockSig,
-            )
         }
-            .filterNotNull()
             .distinctUntilChanged()
-            .conflate()
-            // [T-android-stream-grow-anim] Follow the bottom often enough that
-            // the viewport never falls more than a fraction of one item behind.
-            // Diagnostics with a 350ms sample showed GLIDE starting from
-            // fIdx=1..5 — the viewport was whole items behind, and
-            // animateScrollToItem across multiple items snaps most of the
-            // distance instantly then animates only the last sliver, so it
-            // read as "no animation". With the VM-side dual-path flush already
-            // pacing content updates to 200–500ms, a 120ms scroll sample keeps
-            // the viewport within the SAME item (fIdx=0, small fOff), where
-            // animateScrollToItem is a genuine smooth glide. (The "accumulate
-            // then glide" the user asked for now lives in the VM flush; here we
-            // just keep up smoothly.)
-            .sample(120L)
             .collect {
                 if (!viewModel.isStreaming.value) return@collect
-                if (userScrolledAway) return@collect
-                if (listState.isScrollInProgress) return@collect
-                val sinceInterrupt = System.currentTimeMillis() - lastInterruptMs
-                if (sinceInterrupt < 1000L) return@collect
-                // [T-android-stream-grow-anim] Frame-driven glide to the bottom.
-                // animateScrollToItem(0) was the problem: when the viewport had
-                // fallen >= 1 item behind (diagnostics showed fIdx=1..5 during
-                // fast streams), it snaps most of the distance instantly and
-                // animates only the final sliver — reading as "no animation".
-                // Instead, scroll toward the bottom a bounded amount per frame
-                // inside one scroll session until index 0 is fully pinned
-                // (fIdx==0 && fOff==0). Every frame moves, so the whole catch-up
-                // is visibly animated regardless of how many items behind we
-                // are. We never measure item heights (the source of earlier
-                // stutter) — we just step toward the bottom and stop when the
-                // pin condition is met. In reverseLayout, the bottom (newest,
-                // index 0) is the NEGATIVE scroll direction.
-                if (listState.firstVisibleItemIndex != 0 ||
-                    listState.firstVisibleItemScrollOffset != 0
-                ) {
-                    // [T-android-stream-grow-anim review] Cold start: item sizes
-                    // not measured yet → avgItemSize==0 → the distance estimate
-                    // is bogus and the glide would under-scroll. Snap instead;
-                    // by the next sample the cache is warm and glides resume.
-                    if (avgItemSize.value <= 0) {
-                        tracedScrollToItem("LE(streaming-content)cold", 0, 0)
-                        return@collect
-                    }
-                    // [T-android-stream-grow-anim] Ease-out frame-driven glide
-                    // to the bottom. Each frame moves a fraction of the
-                    // estimated remaining distance so the motion decelerates as
-                    // it lands (curveEaseOut, the shape iOS uses for its 0.2s
-                    // contentOffset animate). Two caps keep it smooth on the
-                    // matched matters:
-                    //   • per-frame step is capped well BELOW a typical
-                    //     streaming fragment (~tens of px) so a single frame
-                    //     can never leap a whole item — that leap was the
-                    //     residual "frames=1 jump" in earlier diagnostics
-                    //     (avg-estimated remaining over-shot, step hit the cap,
-                    //     one frame crossed an item).
-                    //   • a gentler 0.22 fraction + 14px floor stretches even a
-                    //     short catch-up across several frames, so it always
-                    //     reads as a glide rather than a hop.
-                    // Distance uses the running average visible-item height (an
-                    // aggregate, not a per-item delta, so no re-block noise).
-                    val avg = avgItemSize.value.toFloat().coerceAtLeast(1f)
-                    // Step ceiling: ~40% of the average item, so >= ~3 frames
-                    // cross any one item. Bounded to a sane absolute window.
-                    val stepCeil = (avg * 0.40f).coerceIn(28f, 80f)
-                    runCatching {
-                        listState.scroll {
-                            var guard = 0
-                            while (
-                                (listState.firstVisibleItemIndex != 0 ||
-                                    listState.firstVisibleItemScrollOffset != 0) &&
-                                guard < 120
-                            ) {
-                                guard++
-                                val remaining = listState.firstVisibleItemIndex * avg +
-                                    listState.firstVisibleItemScrollOffset
-                                val step = (remaining * 0.22f).coerceIn(14f, stepCeil)
-                                // Negative = toward newest/bottom in reverseLayout.
-                                val consumed = withFrameNanos { scrollBy(-step) }
-                                if (consumed == 0f) break
-                            }
-                        }
-                    }
+                if (userScrolledAway || listState.isScrollInProgress) return@collect
+                val newestIsVisible = listState.layoutInfo.visibleItemsInfo.any { it.index == 0 }
+                if (newestIsVisible) {
+                    listState.requestScrollToItem(0, 0)
                 }
             }
     }

@@ -104,7 +104,6 @@ class ChatViewModel(
 
     companion object {
         internal const val TAG = "ChatViewModel"
-        private const val STREAM_REVEAL_FRAME_MS = 32L
 
         // ── [T-android-compact-runaway] Compaction budgets ──────────────
         //
@@ -658,93 +657,18 @@ class ChatViewModel(
     private val _streamingById = MutableStateFlow<Map<String, StreamingDelta>>(emptyMap())
     val streamingById: StateFlow<Map<String, StreamingDelta>> = _streamingById.asStateFlow()
 
-    /** Complete provider snapshot used by every stream-termination path. */
-    private class StreamFlushState(
-        var latestContent: String,
-        var latestBlocks: List<AssistantBlock>,
-        var latestAwaiting: Boolean,
-        var publishedContent: String,
-    ) {
-        var latestRevision: Long = 0L
-        var publishedRevision: Long = -1L
-        var terminal: Boolean = false
-        var revealJob: Job? = null
-    }
-    private val streamFlushStates = HashMap<String, StreamFlushState>()
-
     /** Drop a message's live snapshot on every stream-termination path. */
     private fun clearStreamFlushState(id: String) {
-        streamFlushStates.remove(id)?.revealJob?.cancel()
+        _streamingById.value = _streamingById.value - id
     }
+
     private fun clearAllStreamFlushStates() {
-        streamFlushStates.values.forEach { it.revealJob?.cancel() }
-        streamFlushStates.clear()
+        _streamingById.value = emptyMap()
     }
-    /** Drop flush states for any message id NOT in [keptIds] (retry/truncate). */
+
+    /** Drop live snapshots for any message id NOT in [keptIds] (retry/truncate). */
     private fun retainStreamFlushStates(keptIds: Set<String>) {
-        val drop = streamFlushStates.keys.filter { it !in keptIds }
-        for (id in drop) clearStreamFlushState(id)
-    }
-
-    /**
-     * Reveal cumulative provider snapshots as ordered text deltas. Providers
-     * are free to return one character or several paragraphs per event; the UI
-     * should not inherit that chunk size. The complete snapshot remains in
-     * [StreamFlushState] for persistence and tool execution, while this loop
-     * advances only the render side-channel at a stable frame rate.
-     */
-    private fun ensureStreamRevealLoop(id: String, state: StreamFlushState) {
-        if (state.revealJob?.isActive == true) return
-        state.revealJob = viewModelScope.launch {
-            while (isActive && streamFlushStates[id] === state) {
-                val target = state.latestContent
-                val current = state.publishedContent
-                if (!target.startsWith(current)) {
-                    // Tool-loop rewrites and retries are replacement snapshots,
-                    // not append-only deltas. Publish those atomically so stale
-                    // text can never survive into the next assistant segment.
-                    state.publishedContent = target
-                } else if (current.length < target.length) {
-                    // One Unicode code point per frame. Adaptive 2/4/6-char
-                    // catch-up made slow or temporarily blocked UI frames
-                    // visibly dump words (and sometimes a whole wrapped line)
-                    // as soon as rendering resumed.
-                    var end = (current.length + 1).coerceAtMost(target.length)
-                    // Never split an emoji/supplementary code point between two
-                    // frames; malformed intermediate UTF-16 makes Markdown
-                    // reparse and visibly flicker.
-                    if (end < target.length && end > 0 &&
-                        Character.isHighSurrogate(target[end - 1]) &&
-                        Character.isLowSurrogate(target[end])
-                    ) {
-                        end++
-                    }
-                    state.publishedContent = target.substring(0, end)
-                }
-
-                if (state.publishedRevision != state.latestRevision ||
-                    _streamingById.value[id]?.content != state.publishedContent
-                ) {
-                    _streamingById.value = _streamingById.value + (
-                        id to StreamingDelta(
-                            content = state.publishedContent,
-                            toolBlocks = state.latestBlocks,
-                            isAwaitingModelResponse = state.latestAwaiting,
-                        )
-                    )
-                    state.publishedRevision = state.latestRevision
-                }
-
-                if (state.terminal && state.publishedContent == state.latestContent) {
-                    // The canonical message already contains the complete final
-                    // snapshot. Removing the overlay now is visually lossless.
-                    _streamingById.value = _streamingById.value - id
-                    streamFlushStates.remove(id)
-                    break
-                }
-                kotlinx.coroutines.delay(STREAM_REVEAL_FRAME_MS)
-            }
-        }
+        _streamingById.value = _streamingById.value.filterKeys { it in keptIds }
     }
 
     /**
@@ -10023,46 +9947,23 @@ class ChatViewModel(
         toolBlocks: List<AssistantBlock>,
         isAwaitingModelResponse: Boolean = false,
     ) {
-        // T-streaming-side-channel: during a live turn, write high-frequency
-        // fields into [_streamingById] instead of mutating the canonical
-        // message list. This keeps the `messages` StateFlow reference stable
-        // across the turn so ChatScreen's top-level reads
-        // (`messages.any/.associate/.isNotEmpty/.lastOrNull`) don't trigger
-        // a full recompose of the 8980-line composable on every token.
-        //
-        // On stream end (isStreaming=false), drain the accumulated delta
-        // back into the canonical message in a single `_messages` emit, then
-        // clear the side-channel entry so post-turn reads (history rebuild,
-        // persist, agent loop) see the canonical truth.
+        // RikkaHub-style streaming: provider TextDelta events are accumulated
+        // by the collector and their latest immutable snapshot is published
+        // immediately. There is deliberately no timer, reveal queue or
+        // character interpolation here. Those layers distort provider order,
+        // build a backlog while the UI is busy and then dump the backlog as a
+        // visible burst. The side-channel only limits recomposition scope; it
+        // does not alter event timing or text boundaries.
         if (isStreaming) {
             val toolBlocksImmutable = toolBlocks.toList()
-            val st = streamFlushStates.getOrPut(id) {
-                val published = _streamingById.value[id]?.content
-                    ?: _messages.value.firstOrNull { it.id == id }?.content.orEmpty()
-                StreamFlushState(
-                    latestContent = content,
-                    latestBlocks = toolBlocksImmutable,
-                    latestAwaiting = isAwaitingModelResponse,
-                    publishedContent = published,
-                )
+            val next = StreamingDelta(
+                content = content,
+                toolBlocks = toolBlocksImmutable,
+                isAwaitingModelResponse = isAwaitingModelResponse,
+            )
+            if (_streamingById.value[id] != next) {
+                _streamingById.value = _streamingById.value + (id to next)
             }
-            st.latestContent = content
-            st.latestBlocks = toolBlocksImmutable
-            st.latestAwaiting = isAwaitingModelResponse
-            st.latestRevision++
-            // Install the overlay synchronously, before the reveal coroutine's
-            // first frame. Otherwise a very short response can reach the
-            // terminal canonical publish first and flash the whole answer.
-            if (!_streamingById.value.containsKey(id)) {
-                _streamingById.value = _streamingById.value + (
-                    id to StreamingDelta(
-                        content = st.publishedContent,
-                        toolBlocks = toolBlocksImmutable,
-                        isAwaitingModelResponse = isAwaitingModelResponse,
-                    )
-                )
-            }
-            ensureStreamRevealLoop(id, st)
             // [T-android-timeout-while-running] If a transient banner
             // (`message.error`) is still on the canonical assistant message
             // when a fresh streaming event arrives, the banner is stale —
@@ -10094,17 +9995,9 @@ class ChatViewModel(
             }
             return
         }
-        // Stream end publishes the complete canonical snapshot immediately for
-        // persistence/non-render consumers, but keeps the render overlay until
-        // the ordered reveal catches up. This avoids a final multi-line jump.
-        val finishingState = streamFlushStates[id]
-        if (finishingState != null) {
-            finishingState.latestContent = content
-            finishingState.latestBlocks = toolBlocks.toList()
-            finishingState.latestAwaiting = isAwaitingModelResponse
-            finishingState.latestRevision++
-            finishingState.terminal = true
-        }
+        // Stream end commits the exact final snapshot and removes the live
+        // overlay. Both snapshots contain the same content, so completion does
+        // not switch between a synthetic partial value and the full answer.
         val current = _messages.value
         val idx = current.indexOfLast { it.id == id }
         if (idx < 0) {
@@ -10122,9 +10015,7 @@ class ChatViewModel(
             isAwaitingModelResponse = isAwaitingModelResponse,
         )
         _messages.value = updated
-        if (finishingState != null) {
-            ensureStreamRevealLoop(id, finishingState)
-        } else if (_streamingById.value.containsKey(id)) {
+        if (_streamingById.value.containsKey(id)) {
             _streamingById.value = _streamingById.value - id
         }
     }
@@ -10136,7 +10027,6 @@ class ChatViewModel(
      * snapshots) without forcing the render layer to consult the delta map.
      */
     internal fun effectiveContent(id: String): String? {
-        streamFlushStates[id]?.latestContent?.let { return it }
         val delta = _streamingById.value[id]
         if (delta != null) return delta.content
         return _messages.value.firstOrNull { it.id == id }?.content
@@ -10150,12 +10040,11 @@ class ChatViewModel(
      * [updateAssistantMessage] call had isStreaming=true.
      */
     private fun flushStreamingDelta(id: String) {
-        val state = streamFlushStates[id]
         val delta = _streamingById.value[id]
-        if (state == null && delta == null) return
-        val completeContent = state?.latestContent ?: delta?.content ?: return
-        val completeBlocks = state?.latestBlocks ?: delta?.toolBlocks.orEmpty()
-        val completeAwaiting = state?.latestAwaiting ?: delta?.isAwaitingModelResponse ?: false
+        if (delta == null) return
+        val completeContent = delta.content
+        val completeBlocks = delta.toolBlocks
+        val completeAwaiting = delta.isAwaitingModelResponse
         val current = _messages.value
         val idx = current.indexOfLast { it.id == id }
         if (idx >= 0) {
@@ -10174,26 +10063,15 @@ class ChatViewModel(
 
     /** Drain ALL outstanding streaming deltas (called on global resets). */
     private fun flushAllStreamingDeltas() {
-        val completeTargets = streamFlushStates.mapValues { (_, state) ->
-            StreamingDelta(
-                content = state.latestContent,
-                toolBlocks = state.latestBlocks,
-                isAwaitingModelResponse = state.latestAwaiting,
-            )
-        }
         val pending = _streamingById.value
         clearAllStreamFlushStates()
-        val targetIds = completeTargets.keys + pending.keys
-        if (targetIds.isEmpty()) {
-            _streamingById.value = emptyMap()
-            return
-        }
+        if (pending.isEmpty()) return
         val current = _messages.value.toMutableList()
         var changed = false
-        for (id in targetIds) {
+        for (id in pending.keys) {
             val idx = current.indexOfLast { it.id == id }
             if (idx < 0) continue
-            val complete = completeTargets[id] ?: pending[id] ?: continue
+            val complete = pending[id] ?: continue
             current[idx] = current[idx].copy(
                 content = complete.content,
                 isStreaming = false,
