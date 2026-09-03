@@ -26,6 +26,8 @@ internal class LazyReadAloudPlayer(context: Context) {
         val p = player ?: synchronized(this) {
             player ?: ReadAloudPlayer(appContext).also { player = it }
         }
+        com.openminis.app.speech.VoiceOutputState.setMuted(false)
+        com.openminis.app.speech.VoiceOutputState.setEnabled(true)
         p.speak(text)
     }
 

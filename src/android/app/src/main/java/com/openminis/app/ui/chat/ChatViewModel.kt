@@ -260,7 +260,7 @@ class ChatViewModel(
                 // sanitizer exists to stop. \\p{Z} additionally covers NBSP
                 // (U+00A0) and the ideographic space, neither of which
                 // Kotlin's trim() removes either.
-                .replace(Regex("[\\s\\p{Z}\\u0085\\u2028\\u2029]+"), " ")
+                .replace(Regex("[\\s\\p{Z}\\^E\\u2028\\u2029]+"), " ")
                 .trim()
                 .take(max)
                 // Trim AGAIN after the cut: take() can leave a trailing space,
@@ -624,6 +624,17 @@ class ChatViewModel(
         }
     }
 
+    /** Expand the tail window far enough for an in-session search hit to render. */
+    fun revealMessage(messageId: String) {
+        val all = _messages.value
+        val index = all.indexOfFirst { it.id == messageId }
+        if (index < 0) return
+        val required = all.size - index
+        if (required > _visibleMessageCap.value) {
+            _visibleMessageCap.value = required.coerceAtMost(all.size)
+        }
+    }
+
     /**
      * Streaming side-channel — see [StreamingDelta]. During a live agent
      * turn, [updateAssistantMessage] writes delta-bearing fields here
@@ -690,17 +701,17 @@ class ChatViewModel(
         for (id in drop) streamFlushStates.remove(id)?.trailingJob?.cancel()
     }
 
-    // Dual-path flush thresholds — ported from iOS. Time tiers scale with total
-    // length; the newline fast-path flushes immediately on a line break once
-    // enough new chars have accumulated, gated to short docs so dense
-    // box-drawing streams don't pin the flush rate to the per-token cadence.
+    // RikkaHub-style streaming cadence: short replies update close to the
+    // display frame rate instead of accumulating visibly large chunks. Very
+    // long replies retain progressively stronger pacing to protect markdown
+    // parsing and low-memory devices.
     private fun streamFlushThrottleMs(len: Int): Long = when {
-        len < 500 -> 200L
-        len < 2_000 -> 300L
-        len < 32_000 -> 500L
-        len < 64_000 -> 1_000L
-        len < 128_000 -> 1_500L
-        else -> 2_000L
+        len < 500 -> 24L
+        len < 2_000 -> 32L
+        len < 32_000 -> 100L
+        len < 64_000 -> 250L
+        len < 128_000 -> 500L
+        else -> 1_000L
     }
 
     /**
@@ -865,6 +876,11 @@ class ChatViewModel(
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
+
+    private val _messageTranslations = MutableStateFlow<Map<String, String>>(emptyMap())
+    val messageTranslations: StateFlow<Map<String, String>> = _messageTranslations.asStateFlow()
+    private val _translatingMessageIds = MutableStateFlow<Set<String>>(emptySet())
+    val translatingMessageIds: StateFlow<Set<String>> = _translatingMessageIds.asStateFlow()
 
     private val _modelName = MutableStateFlow("")
     val modelName: StateFlow<String> = _modelName.asStateFlow()
@@ -5568,6 +5584,94 @@ class ChatViewModel(
                 "deleteFromMessage: cut at sortOrder=$cutoffSortOrder, " +
                     "${deletedMessages.size} message(s) removed, ${remaining.size} remain",
             )
+        }
+    }
+
+    /** Translate a completed reply with the concrete provider already bound to this chat. */
+    fun translateAssistantMessage(messageId: String, targetLanguage: String) {
+        if (messageId in _translatingMessageIds.value) return
+        val message = _messages.value.firstOrNull { it.id == messageId && it.role == "assistant" } ?: return
+        val source = message.toolBlocks
+            .filter { it.kind == "text" && it.content.isNotBlank() }
+            .joinToString("\n\n") { it.content }
+            .ifBlank { message.content }
+        if (source.isBlank()) return
+        val provider = currentProvider ?: run {
+            _error.value = "No provider configured"
+            return
+        }
+
+        _translatingMessageIds.value = _translatingMessageIds.value + messageId
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val response = provider.sendMessage(
+                    messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = source)),
+                    systemPrompt = "Translate the user's text into $targetLanguage. Preserve Markdown structure and code blocks. Return only the translation.",
+                    maxTokens = 8_192,
+                    temperature = null,
+                    imageParts = emptyList(),
+                    tools = emptyList(),
+                    thinkingLevel = ThinkingLevel.OFF,
+                )
+                val translated = response.text.trim()
+                if (translated.isNotEmpty()) {
+                    _messageTranslations.value = _messageTranslations.value + (messageId to translated)
+                }
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                _error.value = "Translation failed: ${error.message ?: error.javaClass.simpleName}"
+            } finally {
+                _translatingMessageIds.value = _translatingMessageIds.value - messageId
+            }
+        }
+    }
+
+    /** Replace a completed assistant reply and persist the edit across restarts. */
+    fun editAssistantMessage(messageId: String, newText: String) {
+        if (_isStreaming.value || newText.isBlank()) return
+        val snapshot = _messages.value
+        val index = snapshot.indexOfFirst { it.id == messageId && it.role == "assistant" }
+        if (index < 0) return
+        val old = snapshot[index]
+        val updated = old.copy(
+            content = newText,
+            toolBlocks = listOf(
+                AssistantBlock(
+                    id = "edited_${System.currentTimeMillis()}",
+                    kind = "text",
+                    content = newText,
+                )
+            ),
+            error = null,
+        )
+        _messages.value = snapshot.toMutableList().also { it[index] = updated }
+        _messageTranslations.value = _messageTranslations.value - messageId
+
+        val sourceIds = old.sourceDbIds
+        if (sourceIds.isEmpty()) return
+        val sid = activeSessionId
+        viewModelScope.launch(Dispatchers.IO) {
+            val partsJson = buildAssistantPartsJson(listOf(AgentContentPart.Text(newText)))
+            sourceIds.forEachIndexed { sourceIndex, id ->
+                chatRepository.updateMessageParts(id, if (sourceIndex == 0) partsJson else "[]")
+            }
+            chatRepository.updateSessionPreview(sid, partsJson)
+            agentHistory.clear()
+            chatRepository.loadMessages(sid).forEach { agentHistory.add(it.toLLMMessage()) }
+        }
+    }
+
+    fun forkFromAssistantMessage(messageId: String, onCreated: (String?) -> Unit) {
+        if (_isStreaming.value) return
+        val message = _messages.value.firstOrNull { it.id == messageId } ?: return
+        val sourceIds = message.sourceDbIds.toSet()
+        if (sourceIds.isEmpty()) {
+            onCreated(null)
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val fork = chatRepository.forkSession(activeSessionId, sourceIds)
+            withContext(Dispatchers.Main) { onCreated(fork?.title) }
         }
     }
 

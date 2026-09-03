@@ -20,6 +20,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -107,6 +108,15 @@ class ReadAloudPlayer(context: Context) {
     private val _isSpeaking = MutableStateFlow(false)
     val isSpeaking: StateFlow<Boolean> = _isSpeaking.asStateFlow()
 
+    private val _isPaused = MutableStateFlow(false)
+    val isPaused: StateFlow<Boolean> = _isPaused.asStateFlow()
+    private val _currentChunkIndex = MutableStateFlow(0)
+    val currentChunkIndex: StateFlow<Int> = _currentChunkIndex.asStateFlow()
+    private val _totalChunks = MutableStateFlow(0)
+    val totalChunks: StateFlow<Int> = _totalChunks.asStateFlow()
+    @Volatile private var currentUtterance: String? = null
+    @Volatile private var resumeSystemUtterance: String? = null
+
     /**
      * Rolling buffer for streaming input. Mirrors [TextToSpeechManager]'s own
      * buffer, but lives here so the sentence split happens BEFORE the routing
@@ -143,8 +153,13 @@ class ReadAloudPlayer(context: Context) {
         VoiceOutputState.registerPlayer(this)
         worker = scope.launch {
             for (text in queue) {
+                while (_isPaused.value) delay(40)
+                currentUtterance = text
+                _currentChunkIndex.value = (_currentChunkIndex.value + 1)
+                    .coerceAtMost(_totalChunks.value.coerceAtLeast(1))
                 runCatching { speakOne(text) }
                     .onFailure { AppLogger.error(TAG, "utterance failed: $it") }
+                currentUtterance = null
                 // Queue drained → speech is over. Counter rather than
                 // Channel.isEmpty, which is experimental API.
                 if (pending.decrementAndGet() <= 0) {
@@ -186,6 +201,8 @@ class ReadAloudPlayer(context: Context) {
     /** Speak [text] as a single utterance, after stopping anything in flight. */
     fun speak(text: String) {
         stop()
+        _currentChunkIndex.value = 0
+        _totalChunks.value = 0
         enqueue(text)
     }
 
@@ -230,6 +247,7 @@ class ReadAloudPlayer(context: Context) {
         val clean = VoiceTextSanitizer.sanitize(raw, linkPhrases)
         if (clean.isBlank()) return
         pending.incrementAndGet()
+        _totalChunks.value = _totalChunks.value + 1
         _isSpeaking.value = true
         if (ownsCapsule()) VoiceOutputState.isSpeaking.value = true
         queue.trySend(clean)
@@ -301,10 +319,67 @@ class ReadAloudPlayer(context: Context) {
         releasePlayer()
         system.stop()
         pending.set(0)
+        _isPaused.value = false
+        currentUtterance = null
+        resumeSystemUtterance = null
+        _currentChunkIndex.value = 0
+        _totalChunks.value = 0
         _isSpeaking.value = false
         if (ownsCapsule()) {
             VoiceOutputState.isSpeaking.value = false
             if (ownsCapsule()) VoiceOutputState.isSynthesizing.value = false
+        }
+    }
+
+    /** Pause provider audio precisely; system TTS resumes the current sentence. */
+    fun pause() {
+        if (_isPaused.value || !_isSpeaking.value) return
+        _isPaused.value = true
+        val media = player
+        if (media != null) {
+            runCatching { if (media.isPlaying) media.pause() }
+        } else {
+            resumeSystemUtterance = currentUtterance
+            system.stop()
+        }
+        _isSpeaking.value = false
+        if (ownsCapsule()) VoiceOutputState.isSpeaking.value = false
+    }
+
+    fun resume() {
+        if (!_isPaused.value) return
+        _isPaused.value = false
+        val media = player
+        if (media != null) {
+            runCatching { media.start() }
+            _isSpeaking.value = true
+            if (ownsCapsule()) VoiceOutputState.isSpeaking.value = true
+            return
+        }
+        resumeSystemUtterance?.let { text ->
+            resumeSystemUtterance = null
+            enqueue(text)
+        }
+    }
+
+    /** Advance to the next queued sentence. */
+    fun skipNext() {
+        playbackFinisher?.invoke()
+        releasePlayer()
+        system.stop()
+        resumeSystemUtterance = null
+        _isPaused.value = false
+    }
+
+    /** Seek provider audio; system TTS falls back to skipping this sentence. */
+    fun fastForward(milliseconds: Int = 5_000) {
+        val media = player
+        if (media != null) {
+            runCatching {
+                media.seekTo((media.currentPosition + milliseconds).coerceAtMost(media.duration))
+            }
+        } else {
+            skipNext()
         }
     }
 

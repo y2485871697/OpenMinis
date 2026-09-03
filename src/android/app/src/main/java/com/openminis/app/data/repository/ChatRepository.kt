@@ -38,6 +38,42 @@ class ChatRepository(internal val dao: ChatDao) {
 
     suspend fun getSession(id: String): ChatSessionEntity? = dao.getSession(id)
 
+    /** Duplicate a conversation through the selected persisted message. */
+    suspend fun forkSession(
+        sourceSessionId: String,
+        throughMessageIds: Set<String>,
+    ): ChatSessionEntity? {
+        val source = dao.getSession(sourceSessionId) ?: return null
+        val rows = loadMessages(sourceSessionId)
+        val cutoff = rows.indexOfLast { it.id in throughMessageIds }
+        if (cutoff < 0) return null
+
+        val now = System.currentTimeMillis()
+        val newId = UUID.randomUUID().toString()
+        val kept = rows.take(cutoff + 1)
+        val fork = source.copy(
+            id = newId,
+            title = source.title?.let { "$it (Branch)" } ?: "Branch",
+            createdAt = now,
+            updatedAt = now,
+            lastMessage = kept.lastOrNull()?.partsJson?.let(::extractTextPreview),
+            pinnedAt = null,
+        )
+        dao.insertSession(fork)
+        kept.forEachIndexed { index, row ->
+            dao.insertMessage(
+                row.copy(
+                    id = UUID.randomUUID().toString(),
+                    sessionId = newId,
+                    sortOrder = index,
+                    createdAt = now + index,
+                    updatedAt = now + index,
+                )
+            )
+        }
+        return fork
+    }
+
     /** All persisted token_usage JSON strings for a session (one per LLM call). */
     suspend fun sessionTokenUsages(sessionId: String): List<String> = dao.tokenUsages(sessionId)
 

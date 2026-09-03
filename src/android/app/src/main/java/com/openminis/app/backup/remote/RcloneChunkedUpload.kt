@@ -117,14 +117,21 @@ class RcloneChunkedUpload(private val context: Context) {
         //
         // A plain suffix is invisible to that filter and still cannot be
         // mistaken for a backup: the restore list matches `.minisbak` exactly.
-        val partial = remote.join("$name.$PARTIAL_SUFFIX")
         val final = remote.join(name)
 
-        sweepAbandonedPartials(remote, keeping = partial)
+        sweepAbandonedPartials(remote)
 
         var lastError: Exception? = null
         for (attempt in 1..2) {
             if (isCancelled()) throw CancelledException()
+            // Never overwrite a scratch object. OpenList-backed WebDAV remotes
+            // route an overwrite through the storage driver's update API; a
+            // number of cloud drivers reject that API with HTTP 405 even though
+            // creating a new object works. A fresh name per attempt keeps the
+            // WebDAV operation on the broadly-supported create path.
+            val partial = remote.join(
+                scratchName(name, java.util.UUID.randomUUID().toString().take(8)),
+            )
             try {
                 // copyfile blocks until the whole package has been sent, so it
                 // can report nothing along the way. rclone tracks the transfer
@@ -194,9 +201,8 @@ class RcloneChunkedUpload(private val context: Context) {
                 return
             } catch (e: Exception) {
                 lastError = e
-                // A failed or unverified transfer must not leave the scratch
-                // object behind — a later attempt overwrites it anyway, but a
-                // permanent failure shouldn't strand junk on the server.
+                // A failed or unverified transfer must not leave this attempt's
+                // uniquely named scratch object behind.
                 runCatching {
                     RcloneBridge.rpc("operations/deletefile", mapOf("fs" to fs, "remote" to partial))
                 }
@@ -225,7 +231,7 @@ class RcloneChunkedUpload(private val context: Context) {
      * `.partial` scratch objects, never a user's `.minisbak` and never the
      * historical `.minis-parts` directory.
      */
-    private fun sweepAbandonedPartials(remote: RcloneRemoteStore.Remote, keeping: String) {
+    private fun sweepAbandonedPartials(remote: RcloneRemoteStore.Remote) {
         val fs = remote.fsSpec
         val list = runCatching {
             RcloneBridge.rpc("operations/list", mapOf("fs" to fs, "remote" to remote.listRoot))
@@ -240,7 +246,6 @@ class RcloneChunkedUpload(private val context: Context) {
             val name = e.optString("Name")
             if (!name.endsWith(".$PARTIAL_SUFFIX")) continue
             val path = remote.join(name)
-            if (path == keeping) continue // this run reuses its own
             bytes += e.optLong("Size")
             runCatching {
                 RcloneBridge.rpc("operations/deletefile", mapOf("fs" to fs, "remote" to path))
@@ -663,6 +668,10 @@ class RcloneChunkedUpload(private val context: Context) {
          * — see the note in [upload].
          */
         const val PARTIAL_SUFFIX = "partial"
+
+        /** New-object scratch name used to avoid WebDAV overwrite/update APIs. */
+        internal fun scratchName(packageName: String, nonce: String): String =
+            "$packageName.$nonce.$PARTIAL_SUFFIX"
 
         /**
          * Legacy chunked-upload directory. READ-ONLY: retained so packages an

@@ -83,9 +83,19 @@ class RcloneRemoteSingleFileTest {
      */
     @Test
     fun `scratch name is suffix-based, not dot-prefixed`() {
-        val scratch = "backup-1.minisbak.${RcloneChunkedUpload.PARTIAL_SUFFIX}"
+        val scratch = RcloneChunkedUpload.scratchName("backup-1.minisbak", "attempt-a")
         assertFalse("dotfiles are hidden from WebDAV listings", scratch.startsWith("."))
         assertTrue(scratch.endsWith(".partial"))
+    }
+
+    @Test
+    fun `each upload attempt uses a fresh scratch object`() {
+        val first = RcloneChunkedUpload.scratchName("backup-1.minisbak", "attempt-a")
+        val second = RcloneChunkedUpload.scratchName("backup-1.minisbak", "attempt-b")
+
+        assertFalse("OpenList must not receive an overwrite PUT", first == second)
+        assertEquals("backup-1.minisbak.attempt-a.partial", first)
+        assertEquals("backup-1.minisbak.attempt-b.partial", second)
     }
 
     /** A scratch file must never be offered as a restorable backup. */
@@ -108,11 +118,11 @@ class RcloneRemoteSingleFileTest {
     fun `a large package still uploads under one final name`() {
         val r = remote("webdav", "backups")
         val name = "backup-large.minisbak"
-        val partial = r.join("$name.${RcloneChunkedUpload.PARTIAL_SUFFIX}")
+        val partial = r.join(RcloneChunkedUpload.scratchName(name, "attempt-a"))
         val final = r.join(name)
 
         assertEquals("backups/backup-large.minisbak", final)
-        assertEquals("backups/backup-large.minisbak.partial", partial)
+        assertEquals("backups/backup-large.minisbak.attempt-a.partial", partial)
         assertFalse(
             "new uploads must never write the legacy parts directory",
             partial.contains(RcloneChunkedUpload.PARTS_DIR) ||

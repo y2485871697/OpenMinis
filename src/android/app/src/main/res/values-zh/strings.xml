@@ -1799,4 +1799,17 @@
     <string name="soul_crop_title">裁剪</string>
     <string name="soul_crop_cancel">取消裁剪</string>
     <string name="soul_crop_confirm">使用裁剪结果</string>
+    <string name="message_action_copy">复制回复</string>
+    <string name="message_action_regenerate">重新生成</string>
+    <string name="message_action_read_aloud">朗读</string>
+    <string name="message_action_translate">翻译</string>
+    <string name="message_action_more">更多</string>
+    <string name="message_action_web_render">网页视图</string>
+    <string name="message_action_edit">编辑回复</string>
+    <string name="message_action_share">分享</string>
+    <string name="message_action_create_branch">创建分支</string>
+    <string name="message_action_delete">从此处删除</string>
+    <string name="message_translation_label">翻译</string>
+    <string name="message_branch_created">已创建分支：%1$s</string>
+    <string name="message_branch_failed">无法创建分支</string>
 </resources>

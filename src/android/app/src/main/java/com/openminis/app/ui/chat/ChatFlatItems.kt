@@ -453,6 +453,25 @@ internal sealed class FlatChatItem {
         override val contentType = "error"
     }
 
+    /** One action row per completed assistant reply, never per markdown shard. */
+    class AssistantActions(
+        val messageId: String,
+        val messageMarkdown: String,
+        val retryUserMessageId: String?,
+    ) : FlatChatItem() {
+        override val key = "actions:$messageId"
+        override val contentType = "actions"
+        override fun equals(other: Any?): Boolean =
+            other is AssistantActions &&
+                messageId == other.messageId &&
+                messageMarkdown == other.messageMarkdown &&
+                retryUserMessageId == other.retryUserMessageId
+
+        override fun hashCode(): Int =
+            ((messageId.hashCode() * 31) + messageMarkdown.length) * 31 +
+                (retryUserMessageId?.hashCode() ?: 0)
+    }
+
     /**
      * See [AssistantText] — same cheap-equals rationale.
      */
@@ -556,6 +575,11 @@ internal fun buildFlatChatItems(
             is FlatChatItem.AssistantInfo -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantTyping -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantError -> item.copy(messageId = "${item.messageId}#$n")
+            is FlatChatItem.AssistantActions -> FlatChatItem.AssistantActions(
+                messageId = "${item.messageId}#$n",
+                messageMarkdown = item.messageMarkdown,
+                retryUserMessageId = item.retryUserMessageId,
+            )
             is FlatChatItem.AssistantLegacyContent -> FlatChatItem.AssistantLegacyContent(
                 messageId = "${item.messageId}#$n",
                 content = item.content,
@@ -776,6 +800,17 @@ internal fun buildFlatChatItems(
         // Inline error banner
         message.error?.let {
             out.add(dedupe(FlatChatItem.AssistantError(message.id, it)))
+        }
+
+        if (!isSystem && !message.isStreaming && joinedMarkdown.isNotBlank()) {
+            val retryUserMessageId = (idx - 1 downTo 0)
+                .firstOrNull { messages[it].role == "user" }
+                ?.let { messages[it].id }
+            out.add(dedupe(FlatChatItem.AssistantActions(
+                messageId = message.id,
+                messageMarkdown = joinedMarkdown,
+                retryUserMessageId = retryUserMessageId,
+            )))
         }
     }
     return out

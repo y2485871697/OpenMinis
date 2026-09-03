@@ -1972,4 +1972,17 @@
     <string name="soul_crop_title">Crop</string>
     <string name="soul_crop_cancel">Cancel crop</string>
     <string name="soul_crop_confirm">Use crop</string>
+    <string name="message_action_copy">Copy reply</string>
+    <string name="message_action_regenerate">Regenerate</string>
+    <string name="message_action_read_aloud">Read aloud</string>
+    <string name="message_action_translate">Translate</string>
+    <string name="message_action_more">More</string>
+    <string name="message_action_web_render">Web view</string>
+    <string name="message_action_edit">Edit reply</string>
+    <string name="message_action_share">Share</string>
+    <string name="message_action_create_branch">Create branch</string>
+    <string name="message_action_delete">Delete from here</string>
+    <string name="message_translation_label">Translation</string>
+    <string name="message_branch_created">Branch created: %1$s</string>
+    <string name="message_branch_failed">Could not create branch</string>
 </resources>

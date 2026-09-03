@@ -2,6 +2,8 @@ package com.openminis.app.ui.chat
 
 import android.content.Context
 import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.res.stringResource
 import com.openminis.app.R
@@ -42,6 +44,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlayCircleFilled
@@ -50,6 +53,7 @@ import androidx.compose.material.icons.outlined.BrokenImage
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -516,18 +520,16 @@ private fun MdText(
 //
 // [T-android-stream-flush-dualpath] Time-throttle tiers ported verbatim from
 // iOS AIChatViewModel+SSEStream (the `throttle` ladder): the time path is one
-// half of the dual-path flush — the other half is the newline fast-path below.
-// Tiers scale with total length to hold the Pixel 4a ANR / Pixel 6 Scudo-OOM
-// line on dense streams while keeping short replies responsive.
-//   < 500  : 200ms   < 2000 : 300ms   < 32K : 500ms
-//   < 64K  : 1000ms  < 128K : 1500ms  else  : 2000ms
+// Keep the legacy renderer in step with ChatViewModel's RikkaHub-style
+// near-frame updates. Longer documents still slow down progressively so
+// markdown parsing cannot monopolize the main thread.
 private fun streamingThrottleFor(content: String): Long = when {
-    content.length < 500 -> 200L
-    content.length < 2_000 -> 300L
-    content.length < 32_000 -> 500L
-    content.length < 64_000 -> 1_000L
-    content.length < 128_000 -> 1_500L
-    else -> 2_000L
+    content.length < 500 -> 24L
+    content.length < 2_000 -> 32L
+    content.length < 32_000 -> 100L
+    content.length < 64_000 -> 250L
+    content.length < 128_000 -> 500L
+    else -> 1_000L
 }
 
 
@@ -1702,7 +1704,28 @@ private fun RenderBlock(block: MdBlock) {
 
         is MdBlock.CodeBlock -> {
             val clipboardManager = LocalClipboardManager.current
+            val context = LocalContext.current
+            val scope = rememberCoroutineScope()
             var copied by remember { mutableStateOf(false) }
+            val fileExtension = remember(block.language) {
+                block.language.lowercase()
+                    .filter { it.isLetterOrDigit() }
+                    .take(10)
+                    .ifBlank { "txt" }
+            }
+            val saveCodeLauncher = rememberLauncherForActivityResult(
+                contract = ActivityResultContracts.CreateDocument("text/plain"),
+            ) { uri ->
+                if (uri != null) {
+                    scope.launch(Dispatchers.IO) {
+                        runCatching {
+                            context.contentResolver.openOutputStream(uri)?.use { output ->
+                                output.write(block.code.toByteArray(Charsets.UTF_8))
+                            }
+                        }
+                    }
+                }
+            }
             if (copied) {
                 LaunchedEffect(Unit) {
                     kotlinx.coroutines.delay(1500)
@@ -1714,32 +1737,49 @@ private fun RenderBlock(block: MdBlock) {
                     .fillMaxWidth()
                     .padding(bottom = 8.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(colors.codeBg),
+                    .background(MaterialTheme.colorScheme.surfaceContainer)
+                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp)),
             ) {
-                // Header row: language label + copy button
+                // Compact RikkaHub-style toolbar: language, save, copy.
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 12.dp, end = 8.dp, top = 6.dp),
+                        .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                        .padding(start = 12.dp, end = 4.dp, vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
                         text = block.language.ifEmpty { "code" },
-                        fontSize = 11.sp,
-                        color = MdCodeLangColor,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f),
                         modifier = Modifier.weight(1f),
                     )
-                    Icon(
-                        imageVector = if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
-                        contentDescription = if (copied) "Copied" else "Copy code",
-                        tint = if (copied) Color(0xFF34C759) else Color.White.copy(alpha = 0.4f),
-                        modifier = Modifier
-                            .size(16.dp)
-                            .clickable {
+                    IconButton(
+                        onClick = { saveCodeLauncher.launch("code.$fileExtension") },
+                        modifier = Modifier.size(32.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = "Save code",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                    IconButton(
+                        onClick = {
                                 clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(block.code))
                                 copied = true
-                            },
-                    )
+                        },
+                        modifier = Modifier.size(32.dp),
+                    ) {
+                        Icon(
+                            imageVector = if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
+                            contentDescription = if (copied) "Copied" else "Copy code",
+                            tint = if (copied) Color(0xFF34C759) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
                 }
                 // iOS parity (SelectableMarkdownView.swift L971): cap visual
                 // code-block height at ~400 pt and let an internal scroll
@@ -1767,7 +1807,7 @@ private fun RenderBlock(block: MdBlock) {
                             text = block.code,
                             fontSize = BaseFontSize * 0.85f,
                             fontFamily = FontFamily.Monospace,
-                            color = colors.codeText,
+                            color = MaterialTheme.colorScheme.onSurface,
                             lineHeight = BaseLineHeight * 0.9f,
                         )
                     }
@@ -3692,4 +3732,3 @@ private fun isTablePipeArtifact(content: String): Boolean {
     }
     return bareCount % 2 == 1
 }
-

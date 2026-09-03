@@ -688,15 +688,15 @@ internal fun ToolCallPill(
     // without pushing the duration out of view. Title takes the remaining
     // space via weight(1f), duration stays fixed-width (softWrap=false).
     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
-      Box(modifier = Modifier.weight(1f, fill = false)) {
-        Row(
+      Box(modifier = Modifier.weight(1f)) {
+        Column(
             modifier = Modifier
                 .background(
-                    ChatColors.toolCapsuleBg,
-                    CircleShape,
+                    MaterialTheme.colorScheme.surfaceContainer,
+                    RoundedCornerShape(8.dp),
                 )
-                .border(0.5.dp, ChatColors.toolBorder, CircleShape)
-                .clip(CircleShape)
+                .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+                .clip(RoundedCornerShape(8.dp))
                 .then(
                     if (shimmerTranslate != null) {
                         Modifier.drawWithContent {
@@ -723,11 +723,12 @@ internal fun ToolCallPill(
                     onLongClick = if (onRerunFromHere != null || onCopyDetails != null) {
                         { showToolMenu = true }
                     } else null,
-                )
-                .padding(horizontal = 12.dp)
-                .height(36.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                ),
         ) {
+          Row(
+              modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 12.dp),
+              verticalAlignment = Alignment.CenterVertically,
+          ) {
             // Status icon — always the typed tool icon. Color shifts to
             // reflect terminal status (success / failed / cancelled); while
             // running it stays in the tool's accent color so the user can
@@ -792,6 +793,27 @@ internal fun ToolCallPill(
                 Spacer(modifier = Modifier.width(8.dp))
                 ToolStopButton(onStop = onStop)
             }
+            Spacer(modifier = Modifier.width(4.dp))
+            Icon(
+                Icons.Default.ChevronRight,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+          }
+          if (block.content.isNotBlank()) {
+              HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+              Text(
+                  text = block.content.trim(),
+                  modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                  fontFamily = FontFamily.Monospace,
+                  fontSize = 11.sp,
+                  lineHeight = 16.sp,
+                  maxLines = 7,
+                  overflow = TextOverflow.Ellipsis,
+              )
+          }
         }
         // [T-android-tool-bubble-longpress-menu] Long-press menu anchored to
         // the pill. Items mirror the user-bubble menu's style (MinisMenu +

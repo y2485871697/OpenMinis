@@ -141,6 +141,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.RadioButtonChecked
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.ripple
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -567,12 +568,15 @@ fun ChatScreen(
     // Callers needing the full history (compact / fork / regenerate / send)
     // continue to read viewModel.messages directly inside the VM.
     val messages by viewModel.uiMessages.collectAsState()
+    val allMessages by viewModel.messages.collectAsState()
     val hasOlderMessages by viewModel.hasOlderMessages.collectAsState()
     val isStreaming by viewModel.isStreaming.collectAsState()
     val canResume by viewModel.canResume.collectAsState()
     // [T-android-compact-progress] null when no compaction is running.
     val compactProgress by viewModel.compactProgress.collectAsState()
     val error by viewModel.error.collectAsState()
+    val messageTranslations by viewModel.messageTranslations.collectAsState()
+    val translatingMessageIds by viewModel.translatingMessageIds.collectAsState()
     val modelName by viewModel.modelName.collectAsState()
     val sessionTitle by viewModel.sessionTitle.collectAsState()
     val sessionCategory by viewModel.sessionCategory.collectAsState()
@@ -941,6 +945,8 @@ fun ChatScreen(
     var showThinkingLevelSheet by remember { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
     var showChatMenu by remember { mutableStateOf(false) }
+    var showMessageSearch by remember { mutableStateOf(false) }
+    var pendingSearchMessageId by remember { mutableStateOf<String?>(null) }
     var showSkillsSheet by remember { mutableStateOf(false) }
     // [T-mcp-integration-android] MCPs-in-Session sheet visibility.
     var showMcpsSheet by remember { mutableStateOf(false) }
@@ -2686,7 +2692,17 @@ fun ChatScreen(
                                     ) { showModelPicker = true }
                                     .padding(horizontal = 4.dp, vertical = 1.dp),
                             ) {
-                                // Line 1: green dot + group name + dropdown arrow (iOS: "● Default ⌄")
+                                val groupNameDisplay = selectedGroupName.ifEmpty {
+                                    if (selectedGroupId == null) {
+                                        ""
+                                    } else {
+                                        val defaultGroupId = providerRepository.defaultPrimaryGroupId
+                                        availableGroups.firstOrNull { it.id == defaultGroupId }?.name
+                                            ?: stringResource(R.string.model_picker_default_badge)
+                                    }
+                                }
+                                // Line 1 keeps the concrete model prominent. This
+                                // is also what a grouped session is actually using.
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(3.dp),
@@ -2699,65 +2715,22 @@ fun ChatScreen(
                                                 CircleShape,
                                             ),
                                     )
-                                    // T-android-topbar-group-name-fallback:
-                                    // _selectedGroupName is empty during the
-                                    // brief window before loadSession's group
-                                    // resolve runs, or whenever a binding
-                                    // resolve fails. Falling straight to the
-                                    // "Default" badge string masks the
-                                    // active group's real name (e.g. the
-                                    // onboarding-created "Default Models" or
-                                    // any user-renamed group). Insert a real
-                                    // fallback chain: collected VM value →
-                                    // active/default group name from the live
-                                    // config → terminal badge string. Mirrors
-                                    // the #476 TopBar title fallback pattern
-                                    // (commit b4c88775).
-                                    //
-                                    // [T-android-group-resolve-skip-uncredentialed]
-                                    // ...but only while a group is ACTUALLY
-                                    // bound. This chain used to run
-                                    // unconditionally, so a session that failed
-                                    // to resolve its group — and was therefore
-                                    // running on a model from the new-chat
-                                    // default chain, unrelated to any group —
-                                    // still displayed the default group's name.
-                                    // The header then contradicted the model
-                                    // line right below it and made a real
-                                    // routing failure read as normal operation,
-                                    // which is what made that bug hard to spot.
-                                    // Mirrors iOS, which keys the group glyph
-                                    // off the binding (`isGroupBound`) rather
-                                    // than off a name lookup.
-                                    val groupNameDisplay = selectedGroupName.ifEmpty {
-                                        if (selectedGroupId == null) {
-                                            ""
-                                        } else {
-                                            val defaultGroupId = providerRepository.defaultPrimaryGroupId
-                                            availableGroups.firstOrNull { it.id == defaultGroupId }?.name
-                                                ?: stringResource(R.string.model_picker_default_badge)
-                                        }
-                                    }
-                                    // Drop the whole affordance when no group is
-                                    // bound — an empty label would still leave
-                                    // a dangling chevron pointing at nothing.
-                                    if (groupNameDisplay.isNotEmpty()) {
-                                        Text(
-                                            text = groupNameDisplay,
-                                            fontSize = 12.sp,
-                                            lineHeight = 14.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            color = ChatColors.secondaryText,
-                                            maxLines = 1,
-                                            style = noFontPad,
-                                        )
-                                        Icon(
-                                            Icons.Default.KeyboardArrowDown,
-                                            contentDescription = null,
-                                            tint = ChatColors.tertiaryText,
-                                            modifier = Modifier.size(14.dp),
-                                        )
-                                    }
+                                    Text(
+                                        text = modelName.ifEmpty { groupNameDisplay.ifEmpty { providerName } },
+                                        fontSize = 12.sp,
+                                        lineHeight = 14.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = ChatColors.secondaryText,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = noFontPad,
+                                    )
+                                    Icon(
+                                        Icons.Default.KeyboardArrowDown,
+                                        contentDescription = null,
+                                        tint = ChatColors.tertiaryText,
+                                        modifier = Modifier.size(14.dp),
+                                    )
                                 }
                                 // Line 2: "provider · model" (iOS: "MiniMax ·
                                 // MiniMax-M2.7") + the thinking-level badge laid
@@ -2811,10 +2784,10 @@ fun ChatScreen(
                                             }
                                         }
                                         Text(
-                                            text = if (providerName.isNotEmpty() && modelName.isNotEmpty()) {
-                                                "$providerName · $modelName"
-                                            } else {
-                                                modelName.ifEmpty { providerName }
+                                            text = when {
+                                                groupNameDisplay.isNotEmpty() && providerName.isNotEmpty() -> "$groupNameDisplay · $providerName"
+                                                groupNameDisplay.isNotEmpty() -> groupNameDisplay
+                                                else -> providerName
                                             },
                                             fontSize = 11.sp,
                                             lineHeight = 13.sp,
@@ -2826,6 +2799,13 @@ fun ChatScreen(
                                             // badge to the right stays intrinsic.
                                             modifier = Modifier.weight(1f, fill = false),
                                         )
+
+                                        activeBalanceValue?.let { balance ->
+                                            ProviderBalanceBadge(
+                                                value = balance,
+                                                modifier = Modifier.widthIn(max = 72.dp),
+                                            )
+                                        }
 
                                         // Show the badge whenever thinking is on,
                                         // and ALSO when it's Off but the active
@@ -2850,12 +2830,6 @@ fun ChatScreen(
                                                 onClick = { showThinkingLevelSheet = true },
                                             )
                                         }
-                                    }
-                                    activeBalanceValue?.let { balance ->
-                                        ProviderBalanceBadge(
-                                            value = balance,
-                                            modifier = Modifier.widthIn(max = 84.dp),
-                                        )
                                     }
                                 }
                             }
@@ -2972,6 +2946,16 @@ fun ChatScreen(
                                 },
                                 leadingIcon = {
                                     Icon(Icons.Outlined.Forum, contentDescription = null)
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.chat_menu_search_messages)) },
+                                onClick = {
+                                    showChatMenu = false
+                                    showMessageSearch = true
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Search, contentDescription = null)
                                 },
                             )
                             MinisMenuDivider()
@@ -3443,8 +3427,9 @@ fun ChatScreen(
                     // seedKeys. Frozen rows are the same instances every tick,
                     // so LazyColumn's key+equals skip path sees ZERO change.
                     //
-                    // Throttle (unchanged): conflate() + sample(80) keeps UI
-                    // publication at ~12fps regardless of token rate.
+                    // Keep the visible stream close to the provider's chunk
+                    // cadence. 24 ms is smooth enough to feel continuous while
+                    // conflate() still prevents a slow frame from queueing work.
                     var frozenRows: List<FlatChatItem> = emptyList()
                     var frozenKeys: Set<String> = emptySet()
                     var frozenSplitIdx = -1
@@ -3463,7 +3448,7 @@ fun ChatScreen(
                         viewModel.streamingById,
                     ) { msgs, stream -> msgs to stream }
                         .conflate()
-                        .sample(80L)
+                        .sample(24L)
                         .collect { (msgs, stream) ->
                             val tickStartNs = System.nanoTime()
                             if (stream.isNotEmpty() && !streamWasActive) {
@@ -3605,6 +3590,29 @@ fun ChatScreen(
                         }
                     }
                 }
+                LaunchedEffect(pendingSearchMessageId, flatItems) {
+                    val target = pendingSearchMessageId ?: return@LaunchedEffect
+                    val originalIndex = flatItems.indexOfFirst { item ->
+                        when (item) {
+                            is FlatChatItem.UserBubble -> item.message.id == target
+                            is FlatChatItem.AssistantHeader -> item.messageId == target
+                            is FlatChatItem.AssistantText -> item.messageId == target
+                            is FlatChatItem.AssistantMarkdownBlock -> item.messageId == target
+                            is FlatChatItem.AssistantThinking -> item.messageId == target
+                            is FlatChatItem.AssistantToolUse -> item.messageId == target
+                            is FlatChatItem.AssistantInfo -> item.messageId == target
+                            is FlatChatItem.AssistantTyping -> item.messageId == target
+                            is FlatChatItem.AssistantError -> item.messageId == target
+                            is FlatChatItem.AssistantActions -> item.messageId == target
+                            is FlatChatItem.AssistantLegacyContent -> item.messageId == target
+                        }
+                    }
+                    if (originalIndex >= 0) {
+                        val displayIndex = flatItems.lastIndex - originalIndex
+                        tracedScrollToItem("MESSAGE-SEARCH", displayIndex, 0)
+                        pendingSearchMessageId = null
+                    }
+                }
                 // T304: when a new tool-use item appears at the trailing
                 // edge (head of flatItems with reverseLayout=true), pin
                 // back to the bottom so the just-arrived tool card is
@@ -3680,28 +3688,10 @@ fun ChatScreen(
                     lastTrailingPinKey = newest.key
                     tracedScrollToItem("trailing-row/${newest.contentType}", 0, 0)
                 }
-                // messageId → isCompactedHistory map. Used to fade entire
-                // assistant-row clusters (header + text + tool pills) at
-                // render time — mirrors iOS isCompactedHistory opacity(0.5).
-                // The lookup uses the underlying message id stripped of any
-                // dedupe suffix (`id#2`) added by buildFlatChatItems.
-                val grayedMap = remember(messages) {
-                    messages.associate { it.id to it.isCompactedHistory }
-                }
-                fun originalMessageId(id: String): String =
-                    id.substringBefore('#')
-                fun FlatChatItem.isCompacted(): Boolean = when (this) {
-                    is FlatChatItem.UserBubble -> grayedMap[originalMessageId(message.id)] == true
-                    is FlatChatItem.AssistantHeader -> grayedMap[originalMessageId(messageId)] == true
-                    is FlatChatItem.AssistantText -> grayedMap[originalMessageId(messageId)] == true
-                    is FlatChatItem.AssistantMarkdownBlock -> grayedMap[originalMessageId(messageId)] == true
-                    is FlatChatItem.AssistantThinking -> grayedMap[originalMessageId(messageId)] == true
-                    is FlatChatItem.AssistantToolUse -> grayedMap[originalMessageId(messageId)] == true
-                    is FlatChatItem.AssistantInfo -> false  // system rows never grayed
-                    is FlatChatItem.AssistantTyping -> false
-                    is FlatChatItem.AssistantError -> grayedMap[originalMessageId(messageId)] == true
-                    is FlatChatItem.AssistantLegacyContent -> grayedMap[originalMessageId(messageId)] == true
-                }
+                // Compaction is a context-management event, not a disabled
+                // state. Keep historical content at normal contrast after the
+                // context window has been compressed.
+                fun FlatChatItem.isCompacted(): Boolean = false
                 // SelectionContainer must wrap the WHOLE LazyColumn — placing
                 // it per-item breaks long-press because items get disposed
                 // when scrolled out and the selection registrar/detector goes
@@ -4299,6 +4289,43 @@ fun ChatScreen(
                                     coroutineScope.launch { tracedScrollToItem("INLINE-RETRY-LAST", 0, 0) }
                                     safeMutate { viewModel.retryLast() }
                                 },
+                            )
+                            is FlatChatItem.AssistantActions -> AssistantMessageActions(
+                                messageMarkdown = item.messageMarkdown,
+                                translation = messageTranslations[item.messageId],
+                                isTranslating = item.messageId in translatingMessageIds,
+                                onRegenerate = item.retryUserMessageId
+                                    ?.takeUnless { isStreaming }
+                                    ?.let { userMessageId ->
+                                        {
+                                            coroutineScope.launch {
+                                                tracedScrollToItem("REGENERATE-REPLY", 0, 0)
+                                            }
+                                            safeMutate { viewModel.retryFromMessage(userMessageId) }
+                                        }
+                                    },
+                                onReadAloud = { selectionReader.speak(item.messageMarkdown) },
+                                onTranslate = { language ->
+                                    viewModel.translateAssistantMessage(item.messageId, language)
+                                },
+                                onEdit = { text ->
+                                    safeMutate { viewModel.editAssistantMessage(item.messageId, text) }
+                                },
+                                onCreateBranch = {
+                                    viewModel.forkFromAssistantMessage(item.messageId) { title ->
+                                        val message = if (title != null) {
+                                            context.getString(R.string.message_branch_created, title)
+                                        } else {
+                                            context.getString(R.string.message_branch_failed)
+                                        }
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            message,
+                                            android.widget.Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }
+                                },
+                                onDelete = { deleteFromHereTargetId = item.messageId },
                             )
                             is FlatChatItem.AssistantLegacyContent -> BoundsTrackedBlock(
                                 messageId = item.messageId,
@@ -6295,6 +6322,45 @@ fun ChatScreen(
                             }
                         }
 
+                        // A normal tap is lightweight dictation directly into
+                        // the composer. Long-press still opens the original
+                        // full voice-conversation panel.
+                        val triggerDictation: () -> Unit = dictation@{
+                            if (com.openminis.app.ui.chat.voice.VoiceModePrefs.isVoiceActive) {
+                                triggerVoiceInput()
+                                return@dictation
+                            }
+                            val manager = com.openminis.app.speech.SpeechRecognitionManager
+                            if (manager.state.value == com.openminis.app.speech.RecognitionState.RECORDING ||
+                                manager.state.value == com.openminis.app.speech.RecognitionState.STARTING
+                            ) {
+                                manager.stopRecording()
+                                return@dictation
+                            }
+                            coroutineScope.launch {
+                                if (!ensureMicPermissionFlow()) return@launch
+                                manager.clearDegradationAndRefresh()
+                                val prefix = viewModel.inputText.value
+                                val separator = if (prefix.isBlank() || prefix.endsWith(' ')) "" else " "
+                                manager.startRecording(
+                                    onPartialOrFinal = { recognized, _ ->
+                                        if (recognized.isNotBlank()) {
+                                            val draft = prefix + separator + recognized
+                                            viewModel.setInputText(draft)
+                                            viewModel.updateSlashMenuState(draft)
+                                        }
+                                    },
+                                    onError = { error, detail ->
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            detail ?: error.name,
+                                            android.widget.Toast.LENGTH_SHORT,
+                                        ).show()
+                                    },
+                                )
+                            }
+                        }
+
                         // App-icon quick action: when the user launched via
                         // `minis://action/voice_chat`, auto-fire the mic on
                         // first compose. Consumed exactly once so re-entering
@@ -6627,8 +6693,8 @@ fun ChatScreen(
                                     (sttState == com.openminis.app.speech.RecognitionState.RECORDING ||
                                         sttState == com.openminis.app.speech.RecognitionState.STARTING),
                                 localeBadge = null,
-                                onClick = { triggerVoiceInput() },
-                                onLongClick = { showLangSheet = true },
+                                onClick = triggerDictation,
+                                onLongClick = triggerVoiceInput,
                                 isVoiceActive = com.openminis.app.ui.chat.voice.VoiceModePrefs.isVoiceActive,
                             )
                         }
@@ -6744,6 +6810,18 @@ fun ChatScreen(
                         viewModel.clearShareInjectedFlag()
                         showMoveSheet = false
                         onMoveToSession(targetId)
+                    },
+                )
+            }
+
+            if (showMessageSearch) {
+                ChatMessageSearchScreen(
+                    messages = allMessages,
+                    onDismiss = { showMessageSearch = false },
+                    onSelect = { messageId ->
+                        showMessageSearch = false
+                        viewModel.revealMessage(messageId)
+                        pendingSearchMessageId = messageId
                     },
                 )
             }
@@ -7330,5 +7408,3 @@ private fun ThinkingLevelSheet(
         }
     }
 }
-
-
