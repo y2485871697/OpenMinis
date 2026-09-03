@@ -553,11 +553,12 @@ private fun StreamingMarkdownTextBody(
     // snapshot instead of building an unbounded queue of obsolete prefixes.
     val latestContent by rememberUpdatedState(content)
     val mdColors = currentMdColors()
-    var blocks by remember(mdColors) {
-        mutableStateOf(
-            parseMarkdownBlocksBlocking(content)
-        )
-    }
+    // Do not synchronously parse the whole assistant reply during
+    // composition. A runBlocking parse here stalls the main thread exactly
+    // when a new stream fragment mounts, so deltas accumulate and then appear
+    // in a burst. snapshotFlow emits the current value immediately; the first
+    // parse still happens without blocking the UI thread.
+    var blocks by remember { mutableStateOf<List<MdBlock>>(emptyList()) }
     LaunchedEffect(mdColors) {
         snapshotFlow { latestContent }
             .distinctUntilChanged()
@@ -576,7 +577,16 @@ private fun StreamingMarkdownTextBody(
 
     ShardSubIndexScope {
         Column(modifier = modifier) {
-            blocks.forEach { block -> RenderBlock(block) }
+            if (blocks.isEmpty() && content.isNotBlank()) {
+                Text(
+                    text = content.take(COLD_PARSE_PREVIEW_CHARS),
+                    fontSize = BaseFontSize,
+                    lineHeight = BaseLineHeight,
+                    color = currentMdColors().text,
+                )
+            } else {
+                blocks.forEach { block -> RenderBlock(block) }
+            }
         }
     }
 }
@@ -928,11 +938,11 @@ private fun MarkdownBlockBody(
     // prefixes must not accumulate behind the parser.
     val latestText by rememberUpdatedState(rawText)
     val mdColors = currentMdColors()
-    var blocks by remember(mdColors) {
-        mutableStateOf(
-            parseMarkdownBlocksBlocking(rawText)
-        )
-    }
+    // The live fragment is mounted from the LazyColumn composition path. A
+    // runBlocking parse here stalls the main thread and lets provider deltas
+    // pile up before Compose can draw them. Start empty and let the initial
+    // snapshotFlow emission populate it on Dispatchers.Default.
+    var blocks by remember { mutableStateOf<List<MdBlock>>(emptyList()) }
     LaunchedEffect(mdColors) {
         snapshotFlow { latestText }
             .distinctUntilChanged()
@@ -949,7 +959,16 @@ private fun MarkdownBlockBody(
             .collect { blocks = it }
     }
     Column(modifier = modifier) {
-        blocks.forEach { RenderBlock(it) }
+        if (blocks.isEmpty() && rawText.isNotBlank()) {
+            Text(
+                text = rawText.take(COLD_PARSE_PREVIEW_CHARS),
+                fontSize = BaseFontSize,
+                lineHeight = BaseLineHeight,
+                color = currentMdColors().text,
+            )
+        } else {
+            blocks.forEach { RenderBlock(it) }
+        }
     }
 }
 
