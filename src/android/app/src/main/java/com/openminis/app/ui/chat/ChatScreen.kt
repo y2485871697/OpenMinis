@@ -4665,9 +4665,9 @@ fun ChatScreen(
                 // FABs hide. This is the Android stand-in for iOS's
                 // protectedRects: derived from the same layout constants
                 // instead of measured rects, which keeps it deterministic.
-                val upFabVisible = messages.isNotEmpty() && !isNearBottom.value
+                val upFabVisible = !isStreaming && messages.isNotEmpty() && !isNearBottom.value
                 val downFabVisible =
-                    userScrolledAway && contentOverflows.value && messages.isNotEmpty()
+                    !isStreaming && userScrolledAway && contentOverflows.value && messages.isNotEmpty()
                 val fabBaseDp = if (lastToolBlocks.isNotEmpty()) 80.dp else 8.dp
                 val fabStackTopDp = when {
                     upFabVisible -> fabBaseDp + 46.dp + 36.dp
@@ -4748,7 +4748,7 @@ fun ChatScreen(
                 // anchor, extra bottom padding = down-button height 36dp + 10dp
                 // spacing). Tapping walks BACK one user turn at a time rather
                 // than jumping to the oldest message.
-                if (messages.isNotEmpty() && !isNearBottom.value) {
+                if (!isStreaming && messages.isNotEmpty() && !isNearBottom.value) {
                     val upBaseBottom = if (lastToolBlocks.isNotEmpty()) 80.dp else 8.dp
                     androidx.compose.material3.FilledIconButton(
                         onClick = {
@@ -4790,7 +4790,7 @@ fun ChatScreen(
                     }
                 }
 
-                if (userScrolledAway && contentOverflows.value && messages.isNotEmpty()) {
+                if (!isStreaming && userScrolledAway && contentOverflows.value && messages.isNotEmpty()) {
                     val fabBottomPadding = if (lastToolBlocks.isNotEmpty()) 80.dp else 8.dp
                     androidx.compose.material3.FilledIconButton(
                         onClick = {

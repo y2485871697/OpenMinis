@@ -120,7 +120,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.mapLatest
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
@@ -516,9 +516,11 @@ private fun MdText(
  * - Completed blocks above are structurally stable → Compose skips them
  *
  * A stable snapshotFlow observes new content. Parsing runs on Default under
- * mapLatest, so a newer provider chunk cancels obsolete parse work without
- * cancelling/restarting the collector itself. The final snapshot is parsed
- * normally when [isStreaming] flips to false.
+ * with conflation, so the parse already in progress is allowed to publish and
+ * only superseded waiting snapshots are skipped. Cancelling every in-flight
+ * parse under a fast provider starved the renderer and made text arrive in
+ * visible bursts. The final snapshot is parsed normally when [isStreaming]
+ * flips to false.
  */
 @Composable
 fun StreamingMarkdownText(
@@ -552,14 +554,15 @@ private fun StreamingMarkdownTextBody(
     LaunchedEffect(isStreaming, mdColors) {
         snapshotFlow { latestContent }
             .distinctUntilChanged()
-            .mapLatest { snapshot ->
-                withContext(Dispatchers.Default) {
+            .conflate()
+            .collect { snapshot ->
+                val computed = withContext(Dispatchers.Default) {
                     parseMarkdownBlocks(snapshot).also {
                         MarkdownParseCaches.prewarm(it, mdColors)
                     }
                 }
+                blocks = computed
             }
-            .collect { computed -> blocks = computed }
     }
 
     ShardSubIndexScope {
@@ -930,8 +933,9 @@ private fun MarkdownBlockBody(
     LaunchedEffect(mdColors) {
         snapshotFlow { latestRawText }
             .distinctUntilChanged()
-            .mapLatest { snapshot ->
-                withContext(Dispatchers.Default) {
+            .conflate()
+            .collect { snapshot ->
+                val computed = withContext(Dispatchers.Default) {
                     val parseStartNs = System.nanoTime()
                     parseMarkdownBlocks(snapshot).also {
                         if (it.size > 1) MarkdownParseCaches.prewarm(it.dropLast(1), mdColors)
@@ -951,8 +955,8 @@ private fun MarkdownBlockBody(
                         )
                     }
                 }
+                blocks = computed
             }
-            .collect { computed -> blocks = computed }
     }
     // [T-android-stream-grow-anim] No height/scroll animation here. We tried
     // animateContentSize to ease the bottom-pinned item's exposed height into a
