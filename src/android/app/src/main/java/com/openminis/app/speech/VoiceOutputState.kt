@@ -281,9 +281,16 @@ object VoiceOutputState {
     }
 
     fun setSpeed(value: Float) {
-        if (_speed.value == value) return
-        _speed.value = value
-        prefs?.edit()?.putFloat(KEY_SPEED, value)?.apply()
+        val safe = value.coerceIn(0.5f, 3.0f)
+        if (_speed.value == safe) return
+        _speed.value = safe
+        prefs?.edit()?.putFloat(KEY_SPEED, safe)?.apply()
+        // Apply the new rate to audio that is already in flight. Provider
+        // audio can update MediaPlayer directly; system TTS restarts from the
+        // estimated current position because Android exposes no live rate API
+        // for an utterance that has already been synthesized.
+        val live = synchronized(players) { players.toList() }
+        live.forEach { runCatching { it.applyPlaybackSpeed(safe) } }
     }
 
     /** Cycle 1× → 1.25× → 1.5× → 2× → 1×. */

@@ -1,6 +1,8 @@
 package com.openminis.app.ui.chat.voice
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -74,6 +76,11 @@ fun SpeechPlayerCapsule(
     if (!globalSpeaking && !playerSpeaking && !paused && !synthesizing) return
 
     var expanded by remember { mutableStateOf(false) }
+    val capsuleWidth by animateDpAsState(
+        targetValue = if (expanded) 220.dp else 118.dp,
+        animationSpec = tween(durationMillis = 160),
+        label = "speech-capsule-width",
+    )
     var capsuleSize by remember { mutableStateOf(IntSize.Zero) }
     val density = LocalDensity.current
     var dragOffsetPx by remember { mutableStateOf(Offset.Zero) }
@@ -138,7 +145,9 @@ fun SpeechPlayerCapsule(
             tonalElevation = 3.dp,
             shadowElevation = 3.dp,
         ) {
-            Column(modifier = Modifier.width(if (expanded) 220.dp else 118.dp)) {
+            // The same progress fraction spans the animated compact/expanded
+            // width, avoiding a stale fixed-width track after toggling state.
+            Column(modifier = Modifier.width(capsuleWidth)) {
                 Row(
                     modifier = Modifier.padding(horizontal = 3.dp, vertical = 2.dp),
                     horizontalArrangement = Arrangement.spacedBy(0.dp),

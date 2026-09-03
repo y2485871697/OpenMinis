@@ -608,9 +608,31 @@ fun ChatScreen(
         activeProviderInstance?.balanceEnabled,
         activeProviderInstance?.balanceApiPath,
         activeProviderInstance?.balanceJsonPath,
+        isStreaming,
     ) {
-        activeProviderInstance?.takeIf { it.balanceEnabled }?.let {
-            providerRepository.refreshBalance(it.id)
+        // Entering the chat and every completed assistant response should
+        // reflect the provider's latest usage immediately, bypassing the
+        // repository's one-minute picker cache.
+        if (!isStreaming) {
+            activeProviderInstance?.takeIf { it.balanceEnabled }?.let {
+                providerRepository.refreshBalance(it.id, force = true)
+            }
+        }
+    }
+
+    LaunchedEffect(
+        activeProviderInstance?.id,
+        activeProviderInstance?.balanceEnabled,
+        activeProviderInstance?.balanceApiPath,
+        activeProviderInstance?.balanceJsonPath,
+    ) {
+        val instanceId = activeProviderInstance
+            ?.takeIf { it.balanceEnabled }
+            ?.id
+            ?: return@LaunchedEffect
+        while (true) {
+            kotlinx.coroutines.delay(30_000)
+            providerRepository.refreshBalance(instanceId, force = true)
         }
     }
 

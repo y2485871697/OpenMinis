@@ -27,6 +27,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resume
+import kotlin.math.ceil
+import kotlin.math.roundToInt
 
 /**
  * [T-android-provider-tts-readaloud] Read-aloud playback that routes through
@@ -126,6 +128,13 @@ class ReadAloudPlayer(context: Context) {
     @Volatile private var currentUtterance: String? = null
     @Volatile private var resumeSystemUtterance: String? = null
     private var progressJob: Job? = null
+
+    // Android's system TTS has no seek API. These flags let the active
+    // speakViaSystem loop stop the engine, calculate a new text offset and
+    // restart in place instead of treating fast-forward as a completed reply.
+    @Volatile private var pendingSystemFastForwardMs = 0
+    @Volatile private var restartSystemForSpeed = false
+    @Volatile private var currentSystemFraction = 0f
 
     /**
      * Rolling buffer for streaming input. Mirrors [TextToSpeechManager]'s own
@@ -345,6 +354,9 @@ class ReadAloudPlayer(context: Context) {
         _isPaused.value = false
         currentUtterance = null
         resumeSystemUtterance = null
+        pendingSystemFastForwardMs = 0
+        restartSystemForSpeed = false
+        currentSystemFraction = 0f
         _currentChunkIndex.value = 0
         _totalChunks.value = 0
         _playbackProgress.value = 0f
@@ -389,6 +401,27 @@ class ReadAloudPlayer(context: Context) {
         }
     }
 
+    /** Apply a capsule speed change to the utterance that is playing now. */
+    fun applyPlaybackSpeed(value: Float) {
+        val safe = value.coerceIn(0.5f, 3.0f)
+        system.speechRate = safe
+        val media = player
+        if (media != null) {
+            val keepPaused = _isPaused.value
+            runCatching {
+                media.playbackParams = media.playbackParams.setSpeed(safe)
+                if (keepPaused) media.pause()
+            }.onFailure {
+                AppLogger.error(TAG, "live playback speed $safe rejected by MediaPlayer: $it")
+            }
+            return
+        }
+        if (currentUtterance != null && (system.isSpeaking.value || _isPaused.value)) {
+            restartSystemForSpeed = true
+            system.stop()
+        }
+    }
+
     /** Advance to the next queued sentence. */
     fun skipNext() {
         playbackFinisher?.invoke()
@@ -398,15 +431,20 @@ class ReadAloudPlayer(context: Context) {
         _isPaused.value = false
     }
 
-    /** Seek provider audio; system TTS falls back to skipping this sentence. */
+    /** Seek provider audio; system TTS restarts from an estimated text offset. */
     fun fastForward(milliseconds: Int = 5_000) {
+        if (milliseconds <= 0) return
         val media = player
         if (media != null) {
             runCatching {
                 media.seekTo((media.currentPosition + milliseconds).coerceAtMost(media.duration))
             }
-        } else {
-            skipNext()
+        } else if (currentUtterance != null) {
+            pendingSystemFastForwardMs =
+                (pendingSystemFastForwardMs + milliseconds).coerceAtMost(60_000)
+            // Wakes speakViaSystem immediately. It consumes the request and
+            // re-speaks the remaining text, so the capsule stays mounted.
+            system.stop()
         }
     }
 
@@ -657,82 +695,72 @@ class ReadAloudPlayer(context: Context) {
         // before it settles used to drop the text on the floor. Wait (bounded)
         // for a verdict first.
         if (!system.awaitReady()) return false
-        // [T-android-tts-capsule] Apply the capsule's speed each utterance —
-        // the property setter forwards to tts.setSpeechRate, so mid-reply
-        // speed changes take effect from the next sentence.
-        system.speechRate = VoiceOutputState.speed.value
-        // [T-android-system-voice-catalog] Apply the picked system voice (null
-        // = engine default / auto language), and surface its label on the
-        // capsule chip — matching iOS, whose chip shows "Tingting (Chinese)"
-        // rather than a generic "System TTS" once a voice is chosen.
-        system.preferredVoiceName = VoiceOutputState.systemVoiceName.value
-        if (ownsCapsule()) {
-            VoiceOutputState.activeModelLabel.value = VoiceOutputState.systemVoiceLabel.value
-        }
-        system.speak(text)
-        // [T-android-tts-rom-compat] speak() may have been REJECTED by the
-        // engine (missing language data on AOSP/OEM engines) — the manager
-        // clears isSpeaking in that case, so the loop below exits immediately
-        // and we report failure instead of pretending the text was spoken.
-        if (!system.isSpeaking.value) return false
-        // Poll rather than plumb a callback through: utterances are short and
-        // this keeps TextToSpeechManager's public surface unchanged.
-        //
-        // [T-android-tts-rom-compat] BOUNDED. Some OEM engines accept the
-        // utterance but never deliver UtteranceProgressListener callbacks
-        // (fragmented listener support), which left this loop spinning forever
-        // and wedged the whole read-aloud queue. Budget scales with length —
-        // generous enough for 0.5× zh speech — and on expiry we log and move
-        // on rather than freeze the worker for the rest of the process.
-        // [T-android-tts-broken-listener] Once this engine has proved its
-        // progress listener never fires, stop paying the budget on EVERY
-        // sentence. Estimate the duration instead and let the utterance run to
-        // completion — crucially without stop(), which is what used to cut
-        // words in half.
-        if (progressListenerBroken) {
-            val estimate = estimatedSpeechMs(text)
-            val started = System.currentTimeMillis()
-            while (System.currentTimeMillis() - started < estimate) {
-                updateCurrentChunkProgress(
-                    (System.currentTimeMillis() - started).toFloat() / estimate.toFloat(),
-                )
-                kotlinx.coroutines.delay(POLL_MS)
+        // The loop may restart a system utterance after a speed/seek request;
+        // each pass applies the latest rate before speaking the remainder.
+        var remaining = text
+        var consumedChars = 0
+        while (remaining.isNotBlank()) {
+            pendingSystemFastForwardMs = 0
+            restartSystemForSpeed = false
+            currentSystemFraction = 0f
+            val speed = VoiceOutputState.speed.value.coerceIn(0.5f, 3.0f)
+            system.speechRate = speed
+            // [T-android-system-voice-catalog] Apply the picked system voice
+            // before every restart as well as the initial utterance.
+            system.preferredVoiceName = VoiceOutputState.systemVoiceName.value
+            if (ownsCapsule()) {
+                VoiceOutputState.activeModelLabel.value = VoiceOutputState.systemVoiceLabel.value
             }
+            system.speak(remaining)
+            if (!system.isSpeaking.value) return false
+
+            val estimatedMs = estimatedSpeechMs(remaining, speed)
+            val started = System.currentTimeMillis()
+            val budgetMs = (remaining.length * 600L + 10_000L).coerceAtMost(180_000L)
+            val deadline = started + budgetMs
+            while (system.isSpeaking.value || progressListenerBroken) {
+                val elapsed = System.currentTimeMillis() - started
+                val local = (elapsed.toFloat() / estimatedMs.toFloat()).coerceIn(0f, 0.98f)
+                currentSystemFraction = local
+                val overall = (consumedChars + remaining.length * local) / text.length.toFloat()
+                updateCurrentChunkProgress(overall)
+                if (pendingSystemFastForwardMs > 0 || restartSystemForSpeed || _isPaused.value) break
+                if (progressListenerBroken && elapsed >= estimatedMs) break
+                if (!progressListenerBroken && System.currentTimeMillis() > deadline) {
+                    AppLogger.error(
+                        TAG,
+                        "system TTS completion never reported (len=${remaining.length}, " +
+                            "waited ${budgetMs}ms); switching to estimated progress",
+                    )
+                    progressListenerBroken = true
+                    break
+                }
+                delay(POLL_MS)
+            }
+
+            val fastForwardMs = pendingSystemFastForwardMs
+            val shouldRestart = restartSystemForSpeed
+            pendingSystemFastForwardMs = 0
+            restartSystemForSpeed = false
+            if (_isPaused.value) return true
+            if (fastForwardMs > 0 || shouldRestart) {
+                val elapsedChars = (remaining.length * currentSystemFraction).roundToInt()
+                val forwardChars = if (fastForwardMs > 0) {
+                    ceil(remaining.length * (fastForwardMs.toFloat() / estimatedMs.toFloat()))
+                        .toInt()
+                } else {
+                    0
+                }
+                val advance = (elapsedChars + forwardChars).coerceIn(1, remaining.length)
+                consumedChars = (consumedChars + advance).coerceAtMost(text.length)
+                remaining = remaining.drop(advance).trimStart()
+                updateCurrentChunkProgress(consumedChars.toFloat() / text.length.toFloat())
+                continue
+            }
+            currentSystemFraction = 1f
             return true
         }
-        val budgetMs = (text.length * 600L + 10_000L).coerceAtMost(180_000L)
-        val deadline = System.currentTimeMillis() + budgetMs
-        val estimatedMs = estimatedSpeechMs(text)
-        val started = System.currentTimeMillis()
-        var timedOut = false
-        while (system.isSpeaking.value) {
-            if (System.currentTimeMillis() > deadline) {
-                AppLogger.error(
-                    TAG,
-                    "system TTS completion never reported (len=${text.length}, " +
-                        "waited ${budgetMs}ms) — engine's progress listener is broken; moving on",
-                )
-                timedOut = true
-                break
-            }
-            updateCurrentChunkProgress(
-                ((System.currentTimeMillis() - started).toFloat() / estimatedMs.toFloat())
-                    .coerceAtMost(0.98f),
-            )
-            kotlinx.coroutines.delay(POLL_MS)
-        }
-        if (timedOut) {
-            // Do NOT system.stop() here. The engine is very likely still
-            // speaking correctly — only its CALLBACKS are broken — so stopping
-            // truncates the sentence mid-word. The next utterance uses
-            // QUEUE_FLUSH anyway, so ordering is preserved without it.
-            //
-            // Report failure so the "read-aloud unavailable" path runs ONCE,
-            // and latch the flag so subsequent sentences take the estimated
-            // -duration path above instead of burning >=10 s of dead air each.
-            progressListenerBroken = true
-            return false
-        }
+        currentSystemFraction = 1f
         return true
     }
 
@@ -741,8 +769,9 @@ class ReadAloudPlayer(context: Context) {
      * the short side of real speech: overlapping slightly is far less bad than
      * the multi-second dead air the full budget produced.
      */
-    private fun estimatedSpeechMs(text: String): Long =
-        (text.length * 90L + 400L).coerceIn(600L, 30_000L)
+    private fun estimatedSpeechMs(text: String, speed: Float = VoiceOutputState.speed.value): Long =
+        (((text.length * 90L + 400L) / speed.coerceIn(0.5f, 3.0f)).toLong())
+            .coerceIn(300L, 60_000L)
 
     private fun updateCurrentChunkProgress(chunkFraction: Float) {
         val total = _totalChunks.value
