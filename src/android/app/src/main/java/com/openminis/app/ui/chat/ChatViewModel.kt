@@ -1129,6 +1129,27 @@ class ChatViewModel(
     // streaming, hiding the Stop button while the new turn was live).
     @Volatile
     private var streamJob: Job? = null
+    /**
+     * Monotonic identity for the currently-authoritative agent stream. A
+     * cancelled provider request can take a little while to unwind below the
+     * HTTP client; if the user retries during that window, late chunks from
+     * the old request must be ignored rather than appended to the new reply.
+     */
+    private val streamGeneration = java.util.concurrent.atomic.AtomicLong(0L)
+
+    private fun claimStreamGeneration(label: String): Long {
+        val generation = streamGeneration.incrementAndGet()
+        val previous = streamJob
+        if (previous?.isActive == true) {
+            AppLogger.warning(
+                TAG_STREAM,
+                "$label superseding active stream job=${previous.hashCode()} generation=$generation",
+            )
+            previous.cancel(CancellationException("superseded by newer stream"))
+        }
+        return generation
+    }
+
     private var currentProvider: LLMProvider? = null
     private var currentModel: LLMModel? = null
 
@@ -6008,6 +6029,7 @@ class ChatViewModel(
 
         // _isStreaming was already set synchronously by the caller.
         val launchedProvider = provider
+        val generation = claimStreamGeneration(label)
         streamJob = viewModelScope.launch(Dispatchers.IO) {
             AppLogger.info(TAG_STREAM, "$label streamJob ENTER sid=$activeSessionId")
             try {
@@ -6027,6 +6049,7 @@ class ChatViewModel(
                         systemPrompt = systemPrompt,
                         fallbackProviders = fallbackProviders,
                         fallbackStrategy = activeFallbackStrategy,
+                        generation = generation,
                     )
                     AppLogger.info(TAG_STREAM, "$label runAgentLoop RETURN normal")
                 } catch (e: CancellationException) {
@@ -6550,6 +6573,7 @@ class ChatViewModel(
         systemPrompt: String?,
         fallbackProviders: List<FallbackCandidate>,
         fallbackStrategy: com.openminis.app.data.model.FallbackStrategy,
+        generation: Long = streamGeneration.get(),
     ) {
         while (_promptQueue.value.isNotEmpty()) {
             val queued = _promptQueue.value
@@ -6627,6 +6651,7 @@ class ChatViewModel(
                     systemPrompt = systemPrompt,
                     fallbackProviders = fallbackProviders,
                     fallbackStrategy = fallbackStrategy,
+                    generation = generation,
                 )
             } catch (e: CancellationException) {
                 Log.d(TAG, "Agent loop (queued-drain) cancelled")
@@ -6892,6 +6917,7 @@ class ChatViewModel(
 
             // Start agent loop with fallback. _isStreaming was set synchronously at top.
             streamLaunched = true
+            val generation = claimStreamGeneration("send")
             streamJob = launch(Dispatchers.IO) {
                 AppLogger.info(TAG_STREAM, "send streamJob ENTER sid=$activeSessionId")
                 try {
@@ -6926,11 +6952,12 @@ class ChatViewModel(
                             systemPrompt = systemPrompt,
                             fallbackProviders = fallbackProviders,
                             fallbackStrategy = activeFallbackStrategy,
+                            generation = generation,
                         )
                         AppLogger.info(TAG_STREAM, "send runAgentLoop RETURN normal")
                         // Drain any prompts the user queued while this loop was running.
                         // Skipped on cancel: cancelled job won't reach here.
-                        drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
+                        drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy, generation)
                         AppLogger.info(TAG_STREAM, "send drainQueuedPrompts RETURN")
                     } catch (e: CancellationException) {
                         AppLogger.info(TAG_STREAM, "send runAgentLoop CANCELLED")
@@ -7245,6 +7272,7 @@ class ChatViewModel(
 
             // _isStreaming was already set synchronously at the top.
             streamLaunched = true
+            val generation = claimStreamGeneration("retryLast")
             streamJob = launch(Dispatchers.IO) {
                 AppLogger.info(TAG_STREAM, "retryLast streamJob ENTER sid=$activeSessionId")
                 try {
@@ -7264,9 +7292,10 @@ class ChatViewModel(
                             systemPrompt = systemPrompt,
                             fallbackProviders = fallbackProviders,
                             fallbackStrategy = activeFallbackStrategy,
+                            generation = generation,
                         )
                         AppLogger.info(TAG_STREAM, "retryLast runAgentLoop RETURN normal")
-                        drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
+                        drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy, generation)
                         AppLogger.info(TAG_STREAM, "retryLast drainQueuedPrompts RETURN")
                     } catch (e: CancellationException) {
                         AppLogger.info(TAG_STREAM, "retryLast runAgentLoop CANCELLED")
@@ -7727,6 +7756,7 @@ class ChatViewModel(
         systemPrompt: String?,
         fallbackProviders: List<FallbackCandidate> = emptyList(),
         fallbackStrategy: com.openminis.app.data.model.FallbackStrategy = com.openminis.app.data.model.FallbackStrategy.default,
+        generation: Long = streamGeneration.get(),
     ) {
         AppLogger.info(TAG_STREAM, "runAgentLoop ENTER provider=${provider.javaClass.simpleName} historySize=${agentHistory.size}")
         // [T-android-mem-probe-trust] Send-path context shape. The existing
@@ -8215,7 +8245,11 @@ class ChatViewModel(
                         systemPrompt, dynamicMaxTokens(currentProvider, lastContextTokens),
                         tools = agentTools,
                         thinkingLevel = if (currentModelSupportsReasoning) _thinkingLevel.value else ThinkingLevel.OFF,
-                    ).collect { chunk ->
+                ).collect { chunk ->
+                // A provider may deliver a late chunk after cancellation while
+                // its socket is unwinding. Never let that stale stream mutate
+                // the current reply or flip its first-chunk diagnostics.
+                if (generation != streamGeneration.get()) return@collect
                 // [T-STALL-DIAG] Mark first byte back from the provider and log
                 // the time-to-first-chunk once per turn.
                 if (firstChunkSeen.compareAndSet(false, true)) {
@@ -11691,6 +11725,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             _canResume.value = false
             _error.value = null
 
+            val generation = claimStreamGeneration("resumeQueueAfterCancel")
             streamJob = launch(Dispatchers.IO) {
                 AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel streamJob ENTER sid=$activeSessionId")
                 try {
@@ -11712,6 +11747,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                             systemPrompt = systemPrompt,
                             fallbackProviders = fallbackProviders,
                             fallbackStrategy = activeFallbackStrategy,
+                            generation = generation,
                         )
                         AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel drainQueuedPrompts RETURN")
                     } catch (e: CancellationException) {
@@ -11975,6 +12011,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
 
             AppLogger.info(TAG_STREAM, "resume _isStreaming=true (sid=$activeSessionId)")
             _isStreaming.value = true
+            val generation = claimStreamGeneration("resume")
             streamJob = launch(Dispatchers.IO) {
                 AppLogger.info(TAG_STREAM, "resume streamJob ENTER sid=$activeSessionId")
                 try {
@@ -11995,9 +12032,10 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                             systemPrompt = systemPrompt,
                             fallbackProviders = fallbackProviders,
                             fallbackStrategy = activeFallbackStrategy,
+                            generation = generation,
                         )
                         AppLogger.info(TAG_STREAM, "resume runAgentLoop RETURN normal")
-                        drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
+                        drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy, generation)
                         AppLogger.info(TAG_STREAM, "resume drainQueuedPrompts RETURN")
                     } catch (e: CancellationException) {
                         AppLogger.info(TAG_STREAM, "resume runAgentLoop CANCELLED")
