@@ -1874,8 +1874,12 @@ fun ChatScreen(
                 }
                 is androidx.compose.foundation.interaction.DragInteraction.Stop -> {
                     isUserDragging = false
-                    lastInterruptMs = System.currentTimeMillis()
                     val nowAtBottom = isNearBottom.value
+                    // Returning all the way to the bottom is an explicit
+                    // request to resume live follow. Keeping the generic 1 s
+                    // post-drag grace here left new text growing behind the
+                    // composer, then made it appear in one delayed burst.
+                    lastInterruptMs = if (nowAtBottom) 0L else System.currentTimeMillis()
                     val newScrolledAway = !nowAtBottom
                     if (newScrolledAway != userScrolledAway) {
                         userScrolledAway = newScrolledAway

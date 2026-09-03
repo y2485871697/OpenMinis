@@ -104,6 +104,7 @@ class ChatViewModel(
 
     companion object {
         internal const val TAG = "ChatViewModel"
+        private const val STREAM_REVEAL_FRAME_MS = 32L
 
         // ── [T-android-compact-runaway] Compaction budgets ──────────────
         //
@@ -662,20 +663,91 @@ class ChatViewModel(
         var latestContent: String,
         var latestBlocks: List<AssistantBlock>,
         var latestAwaiting: Boolean,
-    )
+        var publishedContent: String,
+    ) {
+        var latestRevision: Long = 0L
+        var publishedRevision: Long = -1L
+        var terminal: Boolean = false
+        var revealJob: Job? = null
+    }
     private val streamFlushStates = HashMap<String, StreamFlushState>()
 
     /** Drop a message's live snapshot on every stream-termination path. */
     private fun clearStreamFlushState(id: String) {
-        streamFlushStates.remove(id)
+        streamFlushStates.remove(id)?.revealJob?.cancel()
     }
     private fun clearAllStreamFlushStates() {
+        streamFlushStates.values.forEach { it.revealJob?.cancel() }
         streamFlushStates.clear()
     }
     /** Drop flush states for any message id NOT in [keptIds] (retry/truncate). */
     private fun retainStreamFlushStates(keptIds: Set<String>) {
         val drop = streamFlushStates.keys.filter { it !in keptIds }
-        for (id in drop) streamFlushStates.remove(id)
+        for (id in drop) clearStreamFlushState(id)
+    }
+
+    /**
+     * Reveal cumulative provider snapshots as ordered text deltas. Providers
+     * are free to return one character or several paragraphs per event; the UI
+     * should not inherit that chunk size. The complete snapshot remains in
+     * [StreamFlushState] for persistence and tool execution, while this loop
+     * advances only the render side-channel at a stable frame rate.
+     */
+    private fun ensureStreamRevealLoop(id: String, state: StreamFlushState) {
+        if (state.revealJob?.isActive == true) return
+        state.revealJob = viewModelScope.launch {
+            while (isActive && streamFlushStates[id] === state) {
+                val target = state.latestContent
+                val current = state.publishedContent
+                if (!target.startsWith(current)) {
+                    // Tool-loop rewrites and retries are replacement snapshots,
+                    // not append-only deltas. Publish those atomically so stale
+                    // text can never survive into the next assistant segment.
+                    state.publishedContent = target
+                } else if (current.length < target.length) {
+                    val backlog = target.length - current.length
+                    val step = when {
+                        backlog > 240 -> 6
+                        backlog > 96 -> 4
+                        backlog > 32 -> 2
+                        else -> 1
+                    }
+                    var end = (current.length + step).coerceAtMost(target.length)
+                    // Never split an emoji/supplementary code point between two
+                    // frames; malformed intermediate UTF-16 makes Markdown
+                    // reparse and visibly flicker.
+                    if (end < target.length && end > 0 &&
+                        Character.isHighSurrogate(target[end - 1]) &&
+                        Character.isLowSurrogate(target[end])
+                    ) {
+                        end++
+                    }
+                    state.publishedContent = target.substring(0, end)
+                }
+
+                if (state.publishedRevision != state.latestRevision ||
+                    _streamingById.value[id]?.content != state.publishedContent
+                ) {
+                    _streamingById.value = _streamingById.value + (
+                        id to StreamingDelta(
+                            content = state.publishedContent,
+                            toolBlocks = state.latestBlocks,
+                            isAwaitingModelResponse = state.latestAwaiting,
+                        )
+                    )
+                    state.publishedRevision = state.latestRevision
+                }
+
+                if (state.terminal && state.publishedContent == state.latestContent) {
+                    // The canonical message already contains the complete final
+                    // snapshot. Removing the overlay now is visually lossless.
+                    _streamingById.value = _streamingById.value - id
+                    streamFlushStates.remove(id)
+                    break
+                }
+                kotlinx.coroutines.delay(STREAM_REVEAL_FRAME_MS)
+            }
+        }
     }
 
     /**
@@ -9968,23 +10040,32 @@ class ChatViewModel(
         if (isStreaming) {
             val toolBlocksImmutable = toolBlocks.toList()
             val st = streamFlushStates.getOrPut(id) {
+                val published = _streamingById.value[id]?.content
+                    ?: _messages.value.firstOrNull { it.id == id }?.content.orEmpty()
                 StreamFlushState(
                     latestContent = content,
                     latestBlocks = toolBlocksImmutable,
                     latestAwaiting = isAwaitingModelResponse,
+                    publishedContent = published,
                 )
             }
             st.latestContent = content
             st.latestBlocks = toolBlocksImmutable
             st.latestAwaiting = isAwaitingModelResponse
-            val next = StreamingDelta(
-                content = content,
-                toolBlocks = toolBlocksImmutable,
-                isAwaitingModelResponse = isAwaitingModelResponse,
-            )
-            if (_streamingById.value[id] != next) {
-                _streamingById.value = _streamingById.value + (id to next)
+            st.latestRevision++
+            // Install the overlay synchronously, before the reveal coroutine's
+            // first frame. Otherwise a very short response can reach the
+            // terminal canonical publish first and flash the whole answer.
+            if (!_streamingById.value.containsKey(id)) {
+                _streamingById.value = _streamingById.value + (
+                    id to StreamingDelta(
+                        content = st.publishedContent,
+                        toolBlocks = toolBlocksImmutable,
+                        isAwaitingModelResponse = isAwaitingModelResponse,
+                    )
+                )
             }
+            ensureStreamRevealLoop(id, st)
             // [T-android-timeout-while-running] If a transient banner
             // (`message.error`) is still on the canonical assistant message
             // when a fresh streaming event arrives, the banner is stale —
@@ -10016,8 +10097,17 @@ class ChatViewModel(
             }
             return
         }
-        // Stream end publishes the complete canonical snapshot immediately.
-        clearStreamFlushState(id)
+        // Stream end publishes the complete canonical snapshot immediately for
+        // persistence/non-render consumers, but keeps the render overlay until
+        // the ordered reveal catches up. This avoids a final multi-line jump.
+        val finishingState = streamFlushStates[id]
+        if (finishingState != null) {
+            finishingState.latestContent = content
+            finishingState.latestBlocks = toolBlocks.toList()
+            finishingState.latestAwaiting = isAwaitingModelResponse
+            finishingState.latestRevision++
+            finishingState.terminal = true
+        }
         val current = _messages.value
         val idx = current.indexOfLast { it.id == id }
         if (idx < 0) {
@@ -10035,7 +10125,9 @@ class ChatViewModel(
             isAwaitingModelResponse = isAwaitingModelResponse,
         )
         _messages.value = updated
-        if (_streamingById.value.containsKey(id)) {
+        if (finishingState != null) {
+            ensureStreamRevealLoop(id, finishingState)
+        } else if (_streamingById.value.containsKey(id)) {
             _streamingById.value = _streamingById.value - id
         }
     }
