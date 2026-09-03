@@ -658,19 +658,6 @@ internal fun buildFlatChatItems(
                 "text" -> {
                     if (block.content.isNotEmpty()) {
                         val isLastText = index == lastTextIdx
-                        if (isLastAssistantTurn) {
-                            // Keep the current assistant turn as one stable row per
-                            // text run. The row reads live content directly from the
-                            // streaming side-channel, so a text delta never needs to
-                            // rebuild/split the LazyColumn item list.
-                            out.add(dedupe(FlatChatItem.AssistantText(
-                                messageId = message.id,
-                                block = block,
-                                isStreaming = message.isStreaming && isLastText,
-                                messageMarkdown = joinedMarkdown,
-                            )))
-                            return@forEachIndexed
-                        }
                         // Pattern A: split this text block's content into
                         // independent markdown fragments so each becomes its
                         // own LazyColumn item. Frozen prefix fragments are
