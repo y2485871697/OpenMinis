@@ -519,12 +519,13 @@ private fun liveStreamingDelta(
             .sample(16L)
     }
     val target by flow.collectAsState(initial = null)
-    if (target == null || animateTextBlockId == null) return target
+    val currentTarget = target ?: return null
+    if (animateTextBlockId == null) return currentTarget
 
-    val targetBlockText = target.toolBlocks
+    val targetBlockText = currentTarget.toolBlocks
         .firstOrNull { it.id == animateTextBlockId && it.kind == "text" }
         ?.content
-        ?: target.content
+        ?: currentTarget.content
     var displayedText by remember(messageId, animateTextBlockId) {
         mutableStateOf("")
     }
@@ -565,14 +566,14 @@ private fun liveStreamingDelta(
     } else {
         targetBlockText
     }
-    val displayedBlocks = target.toolBlocks.map { block ->
+    val displayedBlocks = currentTarget.toolBlocks.map { block ->
         if (block.id == animateTextBlockId && block.kind == "text") {
             block.copy(content = renderedText)
         } else {
             block
         }
     }
-    return target.copy(toolBlocks = displayedBlocks)
+    return currentTarget.copy(toolBlocks = displayedBlocks)
 }
 
 @OptIn(ExperimentalMaterial3Api::class, kotlinx.coroutines.FlowPreview::class)
