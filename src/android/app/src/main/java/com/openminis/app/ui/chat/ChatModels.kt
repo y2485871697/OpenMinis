@@ -99,6 +99,12 @@ data class StreamingDelta(
     val content: String,
     val toolBlocks: List<AssistantBlock>,
     val isAwaitingModelResponse: Boolean,
+    /**
+     * Changes only when markdown row boundaries change (blank paragraphs or
+     * fenced-code transitions). Text growth inside the active row stays on
+     * the per-row side channel and does not rebuild the LazyColumn structure.
+     */
+    val contentStructureKey: Int = 0,
 )
 
 data class ChatMessage(
