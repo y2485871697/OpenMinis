@@ -500,6 +500,14 @@ private fun sameStreamingLayout(
 private fun liveStreamingDelta(
     viewModel: ChatViewModel,
     messageId: String,
+    /**
+     * When set, smooth the text block identified by this id. Provider SSE
+     * chunks are transport-sized, not display-sized: a gateway can deliver
+     * several hundred characters in one read. RikkaHub keeps the received
+     * snapshot separate from the text currently painted, so a burst is
+     * released over display frames instead of appearing as a whole paragraph.
+     */
+    animateTextBlockId: String? = null,
 ): StreamingDelta? {
     val flow = remember(viewModel, messageId) {
         // Publish at most once per display frame. Provider SSE chunks can be
@@ -510,8 +518,61 @@ private fun liveStreamingDelta(
             .map { it[messageId] }
             .sample(16L)
     }
-    val delta by flow.collectAsState(initial = null)
-    return delta
+    val target by flow.collectAsState(initial = null)
+    if (target == null || animateTextBlockId == null) return target
+
+    val targetBlockText = target.toolBlocks
+        .firstOrNull { it.id == animateTextBlockId && it.kind == "text" }
+        ?.content
+        ?: target.content
+    var displayedText by remember(messageId, animateTextBlockId) {
+        mutableStateOf("")
+    }
+
+    // A provider chunk may arrive in one burst after a network/read pause.
+    // Advance a small, adaptive number of Unicode code points per tick. Small
+    // gaps stay close to the provider's cadence; large gaps catch up without
+    // freezing the final response behind an overly slow typewriter.
+    LaunchedEffect(messageId, animateTextBlockId, targetBlockText) {
+        if (!targetBlockText.startsWith(displayedText)) {
+            displayedText = ""
+        }
+        while (displayedText.length < targetBlockText.length) {
+            val gap = targetBlockText.codePointCount(displayedText.length, targetBlockText.length)
+            val step = when {
+                gap > 256 -> 4
+                gap > 96 -> 3
+                gap > 24 -> 2
+                else -> 1
+            }
+            var next = displayedText.length
+            repeat(step) {
+                if (next < targetBlockText.length) {
+                    next = targetBlockText.offsetByCodePoints(next, 1)
+                }
+            }
+            displayedText = targetBlockText.substring(0, next)
+            if (displayedText.length < targetBlockText.length) {
+                // 32ms gives a stable ~30Hz text cadence without scheduling a
+                // main-thread task for every provider event.
+                kotlinx.coroutines.delay(32L)
+            }
+        }
+    }
+
+    val renderedText = if (targetBlockText.startsWith(displayedText)) {
+        displayedText
+    } else {
+        targetBlockText
+    }
+    val displayedBlocks = target.toolBlocks.map { block ->
+        if (block.id == animateTextBlockId && block.kind == "text") {
+            block.copy(content = renderedText)
+        } else {
+            block
+        }
+    }
+    return target.copy(toolBlocks = displayedBlocks)
 }
 
 @OptIn(ExperimentalMaterial3Api::class, kotlinx.coroutines.FlowPreview::class)
@@ -4137,7 +4198,11 @@ fun ChatScreen(
                                 // token-rate side channel. Only the active
                                 // streaming row needs live updates.
                                 val liveDelta = if (item.isStreaming) {
-                                    liveStreamingDelta(viewModel, item.messageId)
+                                    liveStreamingDelta(
+                                        viewModel,
+                                        item.messageId,
+                                        animateTextBlockId = item.block.id,
+                                    )
                                 } else {
                                     null
                                 }
@@ -4182,7 +4247,11 @@ fun ChatScreen(
                                 // their immutable row snapshot and must not
                                 // subscribe to the token-rate StateFlow.
                                 val liveDelta = if (item.isStreaming) {
-                                    liveStreamingDelta(viewModel, item.messageId)
+                                    liveStreamingDelta(
+                                        viewModel,
+                                        item.messageId,
+                                        animateTextBlockId = item.parentBlockId,
+                                    )
                                 } else {
                                     null
                                 }
@@ -4191,7 +4260,15 @@ fun ChatScreen(
                                 val liveRawText = if (item.isStreaming && liveBlock != null) {
                                     splitMarkdownIntoBlockTexts(liveBlock.content)
                                         .getOrNull(item.blockIndex)
-                                        ?: liveBlock.content
+                                        // The row set is built from the full
+                                        // provider snapshot, while the live
+                                        // text is intentionally released a
+                                        // few code points at a time. A later
+                                        // row must stay empty until its
+                                        // paragraph has actually arrived;
+                                        // falling back to the whole visible
+                                        // prefix duplicates it in every row.
+                                        ?: if (item.blockIndex == 0) liveBlock.content else ""
                                 } else {
                                     item.rawText
                                 }
