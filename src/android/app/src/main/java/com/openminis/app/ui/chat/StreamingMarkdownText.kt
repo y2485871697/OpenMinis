@@ -120,6 +120,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -547,9 +548,9 @@ private fun StreamingMarkdownTextBody(
     modifier: Modifier = Modifier,
 ) {
     // Keep one stable collector for the lifetime of this composable and keep
-    // rendering the last complete AST until the newest one is ready. Every
-    // provider snapshot is handed to the parser in order; no presentation-side
-    // sampling/conflation is allowed to manufacture frame-sized text jumps.
+    // rendering the last complete AST until the newest one is ready. Markdown
+    // parsing is slower than some providers, so retain only the latest waiting
+    // snapshot instead of building an unbounded queue of obsolete prefixes.
     val latestContent by rememberUpdatedState(content)
     val mdColors = currentMdColors()
     var blocks by remember(mdColors) {
@@ -560,6 +561,7 @@ private fun StreamingMarkdownTextBody(
     LaunchedEffect(mdColors) {
         snapshotFlow { latestContent }
             .distinctUntilChanged()
+            .conflate()
             .map { snapshot -> parseMarkdownBlocks(snapshot) }
             .flowOn(Dispatchers.Default)
             .catch { error ->
@@ -922,8 +924,8 @@ private fun MarkdownBlockBody(
         return
     }
     // Keep the old parsed blocks mounted while the newest snapshot parses on
-    // Default. Parse every accepted provider snapshot without a second
-    // presentation throttle.
+    // Default. At most one parse runs and one newest snapshot waits; obsolete
+    // prefixes must not accumulate behind the parser.
     val latestText by rememberUpdatedState(rawText)
     val mdColors = currentMdColors()
     var blocks by remember(mdColors) {
@@ -934,6 +936,7 @@ private fun MarkdownBlockBody(
     LaunchedEffect(mdColors) {
         snapshotFlow { latestText }
             .distinctUntilChanged()
+            .conflate()
             .map { snapshot -> parseMarkdownBlocks(snapshot) }
             .flowOn(Dispatchers.Default)
             .catch { error ->
