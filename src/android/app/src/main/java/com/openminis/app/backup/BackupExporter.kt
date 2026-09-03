@@ -464,6 +464,11 @@ class BackupExporter(
                 bytes += file.length()
             }
         }
+        val appearance = File(dest, AppearanceBackup.FILE_NAME)
+        if (AppearanceBackup.exportTo(context, appearance)) {
+            entries += 1
+            bytes += appearance.length()
+        }
         return BackupManifest.CategoryStat(entries, bytes, encrypted = false)
     }
 
