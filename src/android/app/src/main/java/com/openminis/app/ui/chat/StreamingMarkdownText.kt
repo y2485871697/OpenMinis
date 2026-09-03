@@ -19,6 +19,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.appendInlineContent
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -45,6 +46,8 @@ import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlayCircleFilled
@@ -56,6 +59,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -103,6 +107,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImagePainter
 import coil.compose.SubcomposeAsyncImage
 import coil.compose.SubcomposeAsyncImageContent
@@ -223,6 +229,14 @@ private val MdCodeLangColor = Color.White.copy(alpha = 0.5f)
 
 val LocalMarkdownFontScale = compositionLocalOf { 1f }
 
+/** Coordinates exclusive code-block scrolling with the parent chat list. */
+internal data class CodeBlockScrollHost(
+    val activeKey: String?,
+    val setActiveKey: (String?) -> Unit,
+)
+
+internal val LocalCodeBlockScrollHost = compositionLocalOf<CodeBlockScrollHost?> { null }
+
 /** Handler invoked when a markdown URL span is tapped. Provided by ChatScreen. */
 val LocalMarkdownUrlClickHandler = compositionLocalOf<((String) -> Unit)?> { null }
 
@@ -271,6 +285,7 @@ private fun MdText(
     modifier: Modifier = Modifier,
     fontSize: TextUnit = BaseFontSize,
     lineHeight: TextUnit = BaseLineHeight,
+    fontFamily: FontFamily? = null,
     fontWeight: FontWeight? = null,
     color: Color = currentMdColors().text,
     maxLines: Int = Int.MAX_VALUE,
@@ -393,6 +408,7 @@ private fun MdText(
         text = effectiveText,
         fontSize = fontSize,
         lineHeight = lineHeight,
+        fontFamily = fontFamily,
         fontWeight = fontWeight,
         color = color,
         maxLines = maxLines,
@@ -1643,10 +1659,24 @@ private fun RenderBlock(block: MdBlock) {
         is MdBlock.CodeBlock -> {
             val clipboardManager = LocalClipboardManager.current
             val context = LocalContext.current
-            val haptic = LocalHapticFeedback.current
             val scope = rememberCoroutineScope()
             var copied by remember(block.code) { mutableStateOf(false) }
-            var codeScrollEnabled by remember(block.code) { mutableStateOf(false) }
+            var showFullscreen by remember(block.code) { mutableStateOf(false) }
+            var localScrollEnabled by remember(block.code) { mutableStateOf(false) }
+            val scrollHost = LocalCodeBlockScrollHost.current
+            val codeShardId = LocalShardId.current
+            val codeScrollKey = remember(block.raw, codeShardId) {
+                "${codeShardId?.messageId}:${codeShardId?.shardId}:${block.raw.hashCode()}"
+            }
+            val codeScrollEnabled = scrollHost?.activeKey == codeScrollKey ||
+                (scrollHost == null && localScrollEnabled)
+            val latestScrollHost by rememberUpdatedState(scrollHost)
+            val latestScrollEnabled by rememberUpdatedState(codeScrollEnabled)
+            DisposableEffect(codeScrollKey) {
+                onDispose {
+                    if (latestScrollEnabled) latestScrollHost?.setActiveKey(null)
+                }
+            }
             val fileExtension = remember(block.language) {
                 block.language.lowercase()
                     .filter { it.isLetterOrDigit() }
@@ -1671,6 +1701,15 @@ private fun RenderBlock(block: MdBlock) {
                     kotlinx.coroutines.delay(1500)
                     copied = false
                 }
+            }
+            val vScroll = rememberScrollState()
+            val hScroll = rememberScrollState()
+            if (showFullscreen) {
+                FullscreenCodeDialog(
+                    language = block.language.ifEmpty { "code" },
+                    code = block.code,
+                    onDismiss = { showFullscreen = false },
+                )
             }
             Column(
                 modifier = Modifier
@@ -1707,7 +1746,42 @@ private fun RenderBlock(block: MdBlock) {
                         )
                     }
                     IconButton(
-                        onClick = { codeScrollEnabled = !codeScrollEnabled },
+                        onClick = { showFullscreen = true },
+                        modifier = Modifier.size(32.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Fullscreen,
+                            contentDescription = "View code fullscreen",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                    IconButton(
+                        onClick = {
+                            if (codeScrollEnabled) {
+                                // Restore the first line before returning the
+                                // vertical gesture to the conversation.
+                                scope.launch {
+                                    vScroll.scrollTo(0)
+                                    hScroll.scrollTo(0)
+                                    if (scrollHost != null) {
+                                        scrollHost.setActiveKey(null)
+                                    } else {
+                                        localScrollEnabled = false
+                                    }
+                                }
+                            } else {
+                                if (scrollHost != null) {
+                                    scrollHost.setActiveKey(codeScrollKey)
+                                } else {
+                                    localScrollEnabled = true
+                                }
+                                scope.launch {
+                                    vScroll.scrollTo(0)
+                                    hScroll.scrollTo(0)
+                                }
+                            }
+                        },
                         modifier = Modifier.size(32.dp),
                     ) {
                         Icon(
@@ -1743,36 +1817,23 @@ private fun RenderBlock(block: MdBlock) {
                 // One vertical gesture belongs to the chat by default. The
                 // middle toolbar button explicitly enables a capped, pannable
                 // code viewport when the user needs to inspect a long block.
-                val vScroll = rememberScrollState()
-                val hScroll = rememberScrollState()
-                val codeBodyModifier = if (codeScrollEnabled) {
-                    Modifier
+                // The cap is always present, preserving the original compact
+                // appearance even while inner scrolling is disabled.
+                Box(
+                    modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(max = 400.dp)
-                        .verticalScroll(vScroll)
-                } else {
-                    Modifier.fillMaxWidth()
-                }
-                Box(
-                    modifier = codeBodyModifier
+                        .verticalScroll(vScroll, enabled = codeScrollEnabled)
                         .padding(bottom = 8.dp),
                 ) {
                     Box(
                         modifier = Modifier
                             .horizontalScroll(hScroll, enabled = codeScrollEnabled)
-                            .pointerInput(block.code) {
-                                detectTapGestures(
-                                    onLongPress = {
-                                        clipboardManager.setText(AnnotatedString(block.code))
-                                        copied = true
-                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    },
-                                )
-                            }
                             .padding(horizontal = 12.dp, vertical = 4.dp),
                     ) {
-                        Text(
-                            text = block.code,
+                        // Register code as a normal selectable text shard.
+                        MdText(
+                            text = AnnotatedString(block.code),
                             fontSize = BaseFontSize * 0.85f,
                             fontFamily = FontFamily.Monospace,
                             color = MaterialTheme.colorScheme.onSurface,
@@ -1986,6 +2047,70 @@ private fun RenderBlock(block: MdBlock) {
 
         is MdBlock.MathDisplay -> {
             RenderMathDisplay(block.latex)
+        }
+    }
+}
+
+@Composable
+private fun FullscreenCodeDialog(
+    language: String,
+    code: String,
+    onDismiss: () -> Unit,
+) {
+    val clipboard = LocalClipboardManager.current
+    val vertical = rememberScrollState()
+    val horizontal = rememberScrollState()
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Close fullscreen code")
+                    }
+                    Text(
+                        text = language,
+                        modifier = Modifier.weight(1f),
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    IconButton(onClick = { clipboard.setText(AnnotatedString(code)) }) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy code")
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(vertical),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .horizontalScroll(horizontal)
+                            .padding(16.dp),
+                    ) {
+                        SelectionContainer {
+                            Text(
+                                text = code,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = BaseFontSize * 0.9f,
+                                lineHeight = BaseLineHeight,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }

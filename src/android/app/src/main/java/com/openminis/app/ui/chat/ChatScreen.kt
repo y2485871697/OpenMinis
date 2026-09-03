@@ -2996,7 +2996,7 @@ fun ChatScreen(
                             expanded = showChatMenu,
                             onDismissRequest = { showChatMenu = false },
                             alignEnd = true,
-                            offset = androidx.compose.ui.unit.DpOffset((-16).dp, 10.dp),
+                            offset = androidx.compose.ui.unit.DpOffset((-8).dp, 10.dp),
                         ) {
                             val compactMenuItemModifier = Modifier.height(40.dp)
                             val compactMenuItemPadding = PaddingValues(horizontal = 12.dp)
@@ -3846,6 +3846,11 @@ fun ChatScreen(
                 // scrolling back in re-registers the shard and the highlight
                 // redraws automatically.
                 val selectionController = remember { SelectionController() }
+                var activeCodeScrollKey by remember(sessionId) { mutableStateOf<String?>(null) }
+                val codeBlockScrollHost = CodeBlockScrollHost(
+                    activeKey = activeCodeScrollKey,
+                    setActiveKey = { activeCodeScrollKey = it },
+                )
                 // [T-android-selection-readaloud] Player backing the selection
                 // toolbar's "Read Aloud". Screen-scoped and independent of the
                 // voice panel's own player (that one only exists while voice
@@ -3924,6 +3929,7 @@ fun ChatScreen(
                     LocalMessageBoundsRegistry provides messageBounds,
                     androidx.compose.ui.platform.LocalTextToolbar provides markdownToolbar,
                     LocalMinisSelectionController provides selectionController,
+                    LocalCodeBlockScrollHost provides codeBlockScrollHost,
                 ) {
                 // Hoisted out of AlwaysStretchOverscrollBox lambda so
                 // SelectionDragTracker (which lives outside the lambda) can
@@ -3942,6 +3948,7 @@ fun ChatScreen(
                 LazyColumn(
                     state = listState,
                     reverseLayout = true,
+                    userScrollEnabled = activeCodeScrollKey == null,
                     // T30: when no tool status bar is rendered, a small bottom
                     // padding keeps the latest message off the composer's
                     // top edge so the conversation breathes. Reuses the same
