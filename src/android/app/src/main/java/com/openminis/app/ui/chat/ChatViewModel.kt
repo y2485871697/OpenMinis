@@ -8185,7 +8185,14 @@ class ChatViewModel(
                             "provider=${currentProvider.javaClass.simpleName} " +
                             "historySize=${agentHistory.size}",
                     )
-                    val firstChunkWatchdog = viewModelScope.launch(Dispatchers.IO) {
+                    // Bind diagnostics to this runAgentLoop job. A detached
+                    // viewModelScope watchdog can survive a cancelled/retried
+                    // provider request and keep reporting NO-FIRST-CHUNK after
+                    // a later request completes, causing misleading overlap
+                    // and extra work (the pattern in the Sept 4 log).
+                    val firstChunkWatchdog = kotlinx.coroutines.CoroutineScope(
+                        kotlinx.coroutines.currentCoroutineContext()
+                    ).launch(Dispatchers.IO) {
                         var waited = 0L
                         while (!firstChunkSeen.get()) {
                             kotlinx.coroutines.delay(10_000L)
