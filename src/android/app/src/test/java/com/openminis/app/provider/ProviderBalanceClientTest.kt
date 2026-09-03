@@ -74,4 +74,19 @@ class ProviderBalanceClientTest {
             ProviderBalanceClient.extractDisplayValue("<!doctype html><html></html>", "remaining")
         }
     }
-}
+
+    @Test
+    fun roundsLongBalanceToTwoDecimals() {
+        assertEquals(
+            "23.23",
+            ProviderBalanceClient.extractDisplayValue("23.22954043", "remaining"),
+        )
+    }
+
+    @Test
+    fun padsBalanceToTwoDecimals() {
+        assertEquals(
+            "9.20",
+            ProviderBalanceClient.extractDisplayValue("9.2", "remaining"),
+        )
+    }}

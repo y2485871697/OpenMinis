@@ -1959,4 +1959,14 @@
     <string name="assistant_add">Add assistant</string>
     <string name="assistant_picker_title">Select assistant</string>
     <string name="assistant_active">Current assistant</string>
+    <string name="assistant_new_title">New assistant</string>
+    <string name="assistant_name">Name</string>
+    <string name="assistant_avatar">Avatar</string>
+    <string name="assistant_create">Add</string>
+    <string name="assistant_copy">Copy</string>
+    <string name="assistant_edit">Edit</string>
+    <string name="assistant_delete">Delete</string>
+    <string name="assistant_delete_title">Delete assistant?</string>
+    <string name="assistant_delete_body">Delete %1$s? This cannot be undone.</string>
+    <string name="assistant_copy_name">%1$s Copy</string>
 </resources>

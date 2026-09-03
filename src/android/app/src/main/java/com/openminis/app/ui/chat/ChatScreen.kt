@@ -2826,12 +2826,7 @@ fun ChatScreen(
                                             // badge to the right stays intrinsic.
                                             modifier = Modifier.weight(1f, fill = false),
                                         )
-                                        activeBalanceValue?.let { balance ->
-                                            ProviderBalanceBadge(
-                                                value = balance,
-                                                modifier = Modifier.widthIn(max = 84.dp),
-                                            )
-                                        }
+
                                         // Show the badge whenever thinking is on,
                                         // and ALSO when it's Off but the active
                                         // model supports deep thinking (iOS
@@ -2855,6 +2850,12 @@ fun ChatScreen(
                                                 onClick = { showThinkingLevelSheet = true },
                                             )
                                         }
+                                    }
+                                    activeBalanceValue?.let { balance ->
+                                        ProviderBalanceBadge(
+                                            value = balance,
+                                            modifier = Modifier.widthIn(max = 84.dp),
+                                        )
                                     }
                                 }
                             }

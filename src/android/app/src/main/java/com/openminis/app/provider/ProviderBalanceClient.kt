@@ -3,6 +3,7 @@ package com.openminis.app.provider
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.model.ProviderType
 import java.math.BigDecimal
+import java.math.RoundingMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
@@ -151,14 +152,19 @@ internal object ProviderBalanceClient {
             throw IllegalArgumentException("Balance value is null")
         }
         return when (value) {
-            is Number -> runCatching {
-                BigDecimal(value.toString()).stripTrailingZeros().toPlainString()
-            }.getOrDefault(value.toString())
-            is String -> value.trim().takeIf { it.isNotEmpty() }
-                ?: throw IllegalArgumentException("Balance value is empty")
+            is Number -> roundedBalance(value.toString()) ?: value.toString()
+            is String -> {
+                val text = value.trim().takeIf { it.isNotEmpty() }
+                    ?: throw IllegalArgumentException("Balance value is empty")
+                roundedBalance(text) ?: text
+            }
             else -> throw IllegalArgumentException("Balance value must be a number or string")
         }
     }
+
+    private fun roundedBalance(raw: String): String? = runCatching {
+        BigDecimal(raw).setScale(2, RoundingMode.HALF_UP).toPlainString()
+    }.getOrNull()
 
     private fun resolveUrl(instance: ProviderInstance, endpoint: String): HttpUrl {
         endpoint.toHttpUrlOrNull()?.let { return it }

@@ -34,7 +34,7 @@ object AssistantProfileStore {
     @Synchronized
     fun ensure(context: Context) {
         SoulStore.ensureExists(context)
-        val directory = directory(context).apply { mkdirs() }
+        directory(context).mkdirs()
         var index = readIndex(context)
         if (index == null || index.ids.isEmpty()) {
             val canonical = SoulStore.fileLocation(context)
@@ -71,19 +71,57 @@ object AssistantProfileStore {
     }
 
     @Synchronized
-    fun createProfile(context: Context): String {
+    fun createProfile(context: Context, name: String, icon: String): String {
         ensure(context)
         val index = readIndex(context) ?: ProfileIndex(DEFAULT_ID, listOf(DEFAULT_ID))
         val id = UUID.randomUUID().toString()
         val defaultFile = SoulMDParser.parse(SoulStore.DEFAULT_CONTENT)
         val created = defaultFile.copy(
-            metadata = defaultFile.metadata.copy(name = "New Assistant"),
+            metadata = defaultFile.metadata.copy(
+                name = name.trim().ifEmpty { "New Assistant" },
+                icon = icon,
+            ),
         )
         atomicWrite(profileFile(context, id), SoulMDParser.serialize(created))
         val updated = index.copy(ids = index.ids + id)
         writeIndex(context, updated)
         publish(context, updated)
         return id
+    }
+
+    @Synchronized
+    fun duplicateProfile(context: Context, sourceId: String, copyName: String): String {
+        ensure(context)
+        val index = readIndex(context) ?: error("Assistant profile index is unavailable")
+        require(sourceId in index.ids) { "Assistant profile was not found" }
+        val source = SoulMDParser.parse(profileFile(context, sourceId).readText())
+        val id = UUID.randomUUID().toString()
+        val duplicate = source.copy(metadata = source.metadata.copy(name = copyName))
+        atomicWrite(profileFile(context, id), SoulMDParser.serialize(duplicate))
+        val updated = index.copy(ids = index.ids + id)
+        writeIndex(context, updated)
+        publish(context, updated)
+        return id
+    }
+
+    @Synchronized
+    fun deleteProfile(context: Context, id: String) {
+        ensure(context)
+        val index = readIndex(context) ?: error("Assistant profile index is unavailable")
+        require(id in index.ids) { "Assistant profile was not found" }
+        require(index.ids.size > 1) { "The last assistant cannot be deleted" }
+        val remaining = index.ids.filterNot { it == id }
+        val nextActiveId = if (index.activeId == id) remaining.first() else index.activeId
+
+        if (index.activeId == id) {
+            val next = SoulMDParser.parse(profileFile(context, nextActiveId).readText())
+            SoulStore.save(context, next)
+        }
+        val target = profileFile(context, id)
+        if (target.exists() && !target.delete()) error("Assistant profile could not be deleted")
+        val updated = ProfileIndex(nextActiveId, remaining)
+        writeIndex(context, updated)
+        publish(context, updated)
     }
 
     @Synchronized
@@ -108,8 +146,7 @@ object AssistantProfileStore {
         }
         val selected = profileFile(context, id)
         require(selected.isFile) { "Assistant profile file was not found" }
-        val parsed = SoulMDParser.parse(selected.readText())
-        SoulStore.save(context, parsed)
+        SoulStore.save(context, SoulMDParser.parse(selected.readText()))
 
         val updated = index.copy(activeId = id)
         writeIndex(context, updated)

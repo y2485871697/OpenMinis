@@ -944,7 +944,13 @@ internal fun ModelPickerSheet(
                                         fontWeight = FontWeight.SemiBold,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.weight(1f),
-                                    )
+                                    )                                    balanceStates[instance.id]?.value?.let { balance ->
+                                        ProviderBalanceBadge(
+                                            value = balance,
+                                            modifier = Modifier.widthIn(max = 84.dp),
+                                        )
+                                        Spacer(Modifier.width(6.dp))
+                                    }
                                     // [T-android-model-picker-polish] Same
                                     // neutral treatment as the group chevron
                                     // above — see that comment for why the
@@ -1047,13 +1053,7 @@ internal fun ModelPickerSheet(
                                             // where every OTHER model row in this
                                             // sheet carries a bolt. iOS puts the
                                             // bolt here for the same reason.
-                                            balanceStates[instance.id]?.value?.let { balance ->
-                                                ProviderBalanceBadge(
-                                                    value = balance,
-                                                    modifier = Modifier.widthIn(max = 84.dp),
-                                                )
-                                                Spacer(Modifier.width(4.dp))
-                                            }
+
                                             QuickTestButton(onClick = { quickTestEntry = displayEntry })
                                         }
                                         // Only when there is something to show:
@@ -1192,13 +1192,7 @@ internal fun ModelPickerSheet(
                                                         .padding(horizontal = 5.dp, vertical = 1.dp),
                                                 )
                                             }
-                                            balanceStates[instance.id]?.value?.let { balance ->
-                                                ProviderBalanceBadge(
-                                                    value = balance,
-                                                    modifier = Modifier.widthIn(max = 84.dp),
-                                                )
-                                                Spacer(Modifier.width(4.dp))
-                                            }
+
                                             QuickTestButton(onClick = { quickTestEntry = entry })
                                         }
                                         // Inset hairline between entries.
