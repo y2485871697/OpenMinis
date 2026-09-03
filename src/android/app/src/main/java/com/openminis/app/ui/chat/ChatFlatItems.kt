@@ -703,36 +703,51 @@ internal fun buildFlatChatItems(
                         // which threw ConcurrentModificationException when the
                         // backing list changed under it. A plain index loop
                         // touches no view.
-                        val fragments = if (isLastText && isLastAssistantTurn) {
-                            rawFragments
-                        } else {
-                            coalesceMarkdownFragments(rawFragments)
-                        }
-                        if (fragments.isEmpty()) {
-                            // Defensive: if the splitter returns nothing for
-                            // a non-empty input (shouldn't happen), fall back
-                            // to a single fragment so content isn't dropped.
-                            out.add(dedupe(FlatChatItem.AssistantMarkdownBlock(
+                        if (message.isStreaming && isLastText && isLastAssistantTurn) {
+                            // Keep the live tail as one render unit. Freezing
+                            // each completed paragraph while the stream is
+                            // active turns a transport burst into a visible
+                            // paragraph-sized jump. The active row is released
+                            // by ChatScreen's fixed frame-paced presenter;
+                            // fragments are split only after the turn ends.
+                            out.add(dedupe(FlatChatItem.AssistantText(
                                 messageId = message.id,
-                                parentBlockId = block.id,
-                                rawText = block.content,
-                                blockIndex = 0,
-                                isLastBlockOfMessage = isLastText && message.isStreaming,
-                                messageIsStreaming = message.isStreaming && isLastText,
+                                block = block,
+                                isStreaming = true,
                                 messageMarkdown = joinedMarkdown,
                             )))
                         } else {
-                            fragments.forEachIndexed { fragIdx, raw ->
-                                val isLastFragOfText = fragIdx == fragments.lastIndex
+                            val fragments = if (isLastText && isLastAssistantTurn) {
+                                rawFragments
+                            } else {
+                                coalesceMarkdownFragments(rawFragments)
+                            }
+                            if (fragments.isEmpty()) {
+                                // Defensive: if the splitter returns nothing for
+                                // a non-empty input (shouldn't happen), fall back
+                                // to a single fragment so content isn't dropped.
                                 out.add(dedupe(FlatChatItem.AssistantMarkdownBlock(
                                     messageId = message.id,
                                     parentBlockId = block.id,
-                                    rawText = raw,
-                                    blockIndex = fragIdx,
-                                    isLastBlockOfMessage = isLastText && isLastFragOfText,
+                                    rawText = block.content,
+                                    blockIndex = 0,
+                                    isLastBlockOfMessage = isLastText && message.isStreaming,
                                     messageIsStreaming = message.isStreaming && isLastText,
                                     messageMarkdown = joinedMarkdown,
                                 )))
+                            } else {
+                                fragments.forEachIndexed { fragIdx, raw ->
+                                    val isLastFragOfText = fragIdx == fragments.lastIndex
+                                    out.add(dedupe(FlatChatItem.AssistantMarkdownBlock(
+                                        messageId = message.id,
+                                        parentBlockId = block.id,
+                                        rawText = raw,
+                                        blockIndex = fragIdx,
+                                        isLastBlockOfMessage = isLastText && isLastFragOfText,
+                                        messageIsStreaming = message.isStreaming && isLastText,
+                                        messageMarkdown = joinedMarkdown,
+                                    )))
+                                }
                             }
                         }
                     }
