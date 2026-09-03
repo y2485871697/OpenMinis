@@ -481,6 +481,7 @@ private fun sameStreamingLayout(
         val newDelta = next[messageId] ?: return false
         if (oldDelta.isAwaitingModelResponse != newDelta.isAwaitingModelResponse) return false
         if (oldDelta.content.isEmpty() != newDelta.content.isEmpty()) return false
+        if (oldDelta.contentStructureKey != newDelta.contentStructureKey) return false
         if (oldDelta.toolBlocks.size != newDelta.toolBlocks.size) return false
         for (index in oldDelta.toolBlocks.indices) {
             val oldBlock = oldDelta.toolBlocks[index]
@@ -4156,27 +4157,47 @@ fun ChatScreen(
                                     }
                                 }
                             }
-                            is FlatChatItem.AssistantMarkdownBlock -> BoundsTrackedBlock(
-                                messageId = item.messageId,
-                                slotKey = "mdblock:${item.parentBlockId}:${item.blockIndex}",
-                                markdown = item.messageMarkdown,
-                            ) {
-                                LargeContentGuard(
-                                    content = item.rawText,
-                                    isStreaming = item.isStreaming,
-                                    stableKey = "mdblock:${item.messageId}:${item.parentBlockId}:${item.blockIndex}",
+                            is FlatChatItem.AssistantMarkdownBlock -> {
+                                // Content-only stream ticks intentionally do not
+                                // rebuild the LazyColumn rows. The active tail
+                                // therefore reads its current fragment from the
+                                // side-channel; completed fragments keep the
+                                // immutable row snapshot they were built with.
+                                val liveDelta = liveStreamingDelta(viewModel, item.messageId)
+                                val liveBlock = liveDelta?.toolBlocks
+                                    ?.firstOrNull { it.id == item.parentBlockId }
+                                val liveRawText = if (item.isStreaming && liveBlock != null) {
+                                    splitMarkdownIntoBlockTexts(liveBlock.content)
+                                        .getOrNull(item.blockIndex)
+                                        ?: liveBlock.content
+                                } else {
+                                    item.rawText
+                                }
+                                val liveMarkdown = liveDelta?.content
+                                    ?.takeIf { item.isStreaming && it.isNotEmpty() }
+                                    ?: item.messageMarkdown
+                                BoundsTrackedBlock(
+                                    messageId = item.messageId,
+                                    slotKey = "mdblock:${item.parentBlockId}:${item.blockIndex}",
+                                    markdown = liveMarkdown,
                                 ) {
-                                    SideEffect {
-                                        selectionController.rememberMessageMarkdown(item.messageId, item.messageMarkdown)
-                                    }
-                                    MarkdownBlock(
-                                        rawText = item.rawText,
+                                    LargeContentGuard(
+                                        content = liveRawText,
                                         isStreaming = item.isStreaming,
-                                        shardId = TextShardId(
-                                            messageId = item.messageId,
-                                            shardId = "mdblock:${item.parentBlockId}:${item.blockIndex}",
-                                        ),
-                                    )
+                                        stableKey = "mdblock:${item.messageId}:${item.parentBlockId}:${item.blockIndex}",
+                                    ) {
+                                        SideEffect {
+                                            selectionController.rememberMessageMarkdown(item.messageId, liveMarkdown)
+                                        }
+                                        MarkdownBlock(
+                                            rawText = liveRawText,
+                                            isStreaming = item.isStreaming,
+                                            shardId = TextShardId(
+                                                messageId = item.messageId,
+                                                shardId = "mdblock:${item.parentBlockId}:${item.blockIndex}",
+                                            ),
+                                        )
+                                    }
                                 }
                             }
                             is FlatChatItem.AssistantThinking -> {
