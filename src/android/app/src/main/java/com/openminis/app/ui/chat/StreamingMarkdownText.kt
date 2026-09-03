@@ -120,9 +120,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.flow.mapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
@@ -546,11 +547,11 @@ private fun StreamingMarkdownTextBody(
     content: String,
     modifier: Modifier = Modifier,
 ) {
-    // Match RikkaHub's renderer contract: keep one stable collector for the
-    // lifetime of this composable, cancel only superseded parse work, and keep
-    // rendering the last complete AST until the newest one is ready. Streaming
-    // and completed replies use the same renderer, so completion cannot flash
-    // from plain text into a differently laid out Markdown tree.
+    // Keep one stable collector for the lifetime of this composable and keep
+    // rendering the last complete AST until the newest one is ready. Finish an
+    // in-flight parse instead of cancelling it on every display tick; conflate
+    // then retains only the freshest waiting snapshot. Cancellation starvation
+    // previously looked like a pause followed by a large text jump.
     val latestContent by rememberUpdatedState(content)
     val mdColors = currentMdColors()
     var blocks by remember(mdColors) {
@@ -561,7 +562,8 @@ private fun StreamingMarkdownTextBody(
     LaunchedEffect(mdColors) {
         snapshotFlow { latestContent }
             .distinctUntilChanged()
-            .mapLatest { snapshot -> parseMarkdownBlocks(snapshot) }
+            .conflate()
+            .map { snapshot -> parseMarkdownBlocks(snapshot) }
             .flowOn(Dispatchers.Default)
             .catch { error ->
                 if (error is kotlinx.coroutines.CancellationException) throw error
@@ -922,10 +924,9 @@ private fun MarkdownBlockBody(
         }
         return
     }
-    // RikkaHub-style live Markdown state: the old parsed blocks stay mounted
-    // while the newest snapshot parses on Default. mapLatest cancels obsolete
-    // work without ever clearing the visible tree, eliminating the blank/text
-    // swaps that looked like flicker.
+    // Keep the old parsed blocks mounted while the newest snapshot parses on
+    // Default. Complete the active parse and conflate pending snapshots so a
+    // fast stream cannot repeatedly cancel work and starve visible updates.
     val latestText by rememberUpdatedState(rawText)
     val mdColors = currentMdColors()
     var blocks by remember(mdColors) {
@@ -936,7 +937,8 @@ private fun MarkdownBlockBody(
     LaunchedEffect(mdColors) {
         snapshotFlow { latestText }
             .distinctUntilChanged()
-            .mapLatest { snapshot -> parseMarkdownBlocks(snapshot) }
+            .conflate()
+            .map { snapshot -> parseMarkdownBlocks(snapshot) }
             .flowOn(Dispatchers.Default)
             .catch { error ->
                 if (error is kotlinx.coroutines.CancellationException) throw error
