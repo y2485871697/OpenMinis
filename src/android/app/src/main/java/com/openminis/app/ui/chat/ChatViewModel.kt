@@ -705,14 +705,11 @@ class ChatViewModel(
                     // text can never survive into the next assistant segment.
                     state.publishedContent = target
                 } else if (current.length < target.length) {
-                    val backlog = target.length - current.length
-                    val step = when {
-                        backlog > 240 -> 6
-                        backlog > 96 -> 4
-                        backlog > 32 -> 2
-                        else -> 1
-                    }
-                    var end = (current.length + step).coerceAtMost(target.length)
+                    // One Unicode code point per frame. Adaptive 2/4/6-char
+                    // catch-up made slow or temporarily blocked UI frames
+                    // visibly dump words (and sometimes a whole wrapped line)
+                    // as soon as rendering resumed.
+                    var end = (current.length + 1).coerceAtMost(target.length)
                     // Never split an emoji/supplementary code point between two
                     // frames; malformed intermediate UTF-16 makes Markdown
                     // reparse and visibly flicker.

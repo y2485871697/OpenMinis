@@ -108,6 +108,9 @@
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
+        <intent>
+            <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
         <!-- T234: needed for androidx.browser CustomTabsClient.bindCustomTabsService
              to discover the user's Chrome (or any Custom Tabs provider) under
              Android 11+ package-visibility rules. Without this the bind silently

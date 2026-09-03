@@ -28,6 +28,7 @@ import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.verticalDrag
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.core.LinearEasing
@@ -953,6 +954,7 @@ fun ChatScreen(
         }
     }
     val inputFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+    var composerFocusEnabled by remember(sessionId) { mutableStateOf(false) }
     // Mirror of iOS `inputFocused` — needed so the swipe-up-on-empty-input
     // gesture only pops the keyboard when it's actually collapsed.
     var inputFocused by remember { mutableStateOf(false) }
@@ -2361,8 +2363,17 @@ fun ChatScreen(
     // focus here also handles the two-pane case where the same composer stays
     // mounted while its session changes and could otherwise retain focus.
     LaunchedEffect(sessionId) {
+        composerFocusEnabled = false
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
+        // Navigation can restore the previous screen's focused text field one
+        // frame after composition. Keep the composer out of focus traversal
+        // until that restoration pass has finished, then clear once more.
+        withFrameNanos { }
+        withFrameNanos { }
+        focusManager.clearFocus(force = true)
+        keyboardController?.hide()
+        composerFocusEnabled = true
     }
 
     // Show top-level error in snackbar (only for errors without an assistant message)
@@ -5995,6 +6006,7 @@ fun ChatScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .heightIn(min = 25.dp)
+                                .focusProperties { canFocus = composerFocusEnabled }
                                 .focusRequester(inputFocusRequester)
                                 .onFocusChanged {
                                     // [T-android-composer-placeholder-rotation]

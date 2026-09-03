@@ -545,6 +545,20 @@ private fun StreamingMarkdownTextBody(
     isStreaming: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    // Parsing a growing snapshot on every synthetic reveal tick makes the
+    // renderer compete with scrolling/layout work. Compose then observes only
+    // the newest parsed snapshot and the reply appears to skip frames. Keep the
+    // live tail as one stable text node; when the stream closes this branch is
+    // replaced once by the fully parsed Markdown below.
+    if (isStreaming) {
+        ShardSubIndexScope {
+            MdText(
+                text = AnnotatedString(content),
+                modifier = modifier,
+            )
+        }
+        return
+    }
     // Read new snapshots from one stable collector. Keying LaunchedEffect on
     // every content change used to cancel the in-flight Markdown parse before
     // it could publish, which is why live replies could stay at one character.
@@ -918,72 +932,16 @@ private fun MarkdownBlockBody(
         }
         return
     }
-    // Live (streaming tail) block.
-    //
-    // Provider chunks are published directly by ChatViewModel. Keep one stable
-    // collector and cancel obsolete parses when a newer fragment snapshot wins;
-    // explicit conflate/sample stages here would add latency and merge updates.
-    val latestRawText by rememberUpdatedState(rawText)
-    // [T-android-inline-parse-offmain] Snapshot the theme colors in
-    // composition so the Default-thread parse below can PREWARM the inline
-    // caches with the exact keys RenderBlock will look up — main-thread
-    // composition of the live block becomes a pure cache hit.
-    val mdColors = currentMdColors()
-    var blocks by remember { mutableStateOf<List<MdBlock>>(emptyList()) }
-    LaunchedEffect(mdColors) {
-        snapshotFlow { latestRawText }
-            .distinctUntilChanged()
-            .conflate()
-            .collect { snapshot ->
-                val computed = withContext(Dispatchers.Default) {
-                    val parseStartNs = System.nanoTime()
-                    parseMarkdownBlocks(snapshot).also {
-                        if (it.size > 1) MarkdownParseCaches.prewarm(it.dropLast(1), mdColors)
-                        if (it.lastOrNull() is MdBlock.Paragraph) {
-                            MarkdownParseCaches.prewarmLiveTail(it, mdColors)
-                        } else {
-                            it.lastOrNull()?.let { last ->
-                                MarkdownParseCaches.prewarm(listOf(last), mdColors)
-                            }
-                        }
-                        if (snapshot.length > COLD_PARSE_OFFMAIN_THRESHOLD_CHARS) {
-                            MarkdownParseCaches.putBlocks(snapshot, it)
-                        }
-                        StreamRenderProfiler.recordParse(
-                            snapshot.length,
-                            (System.nanoTime() - parseStartNs) / 1_000_000.0,
-                        )
-                    }
-                }
-                blocks = computed
-            }
-    }
-    // [T-android-stream-grow-anim] No height/scroll animation here. We tried
-    // animateContentSize to ease the bottom-pinned item's exposed height into a
-    // smooth viewport follow, but diagnostics showed the live fragment's
-    // composable identity is NOT stable across parse ticks (markdown re-blocks
-    // every tick — blocks.size flips 1↔2, last-block position churns), so the
-    // animation reset to initialH=0 almost every tick and "popped from zero"
-    // instead of gliding, AND dragged single-frame cost to ~750–950ms (Davey).
-    // Net regression. The smooth feel comes from reverseLayout's native bottom
-    // pin (no jump, no extra layout cost) plus the per-word fade. A genuine
-    // iOS-style continuous flow would require token-incremental rendering of the
-    // streaming tail, not a height animation on an unstable item.
-    Column(modifier = modifier) {
-        // Keep incremental inline parsing for the live tail, but render it
-        // fully opaque. Word-fade state is not stable when markdown delimiters
-        // re-shape the tail and was causing already-rendered text to flash.
-        val lastIdx = blocks.size - 1
-        blocks.forEachIndexed { idx, block ->
-            if (idx == lastIdx) {
-                androidx.compose.runtime.CompositionLocalProvider(
-                    LocalLiveIncremental provides true,
-                ) { RenderBlock(block) }
-            } else {
-                RenderBlock(block)
-            }
-        }
-    }
+    // The mutable tail is intentionally plain while it grows. Re-running the
+    // block and inline Markdown parsers for every reveal frame caused both
+    // dropped visual frames and brief blank replacements when a paragraph
+    // split changed the fragment identity. Frozen fragments still take the
+    // normal Markdown path above, so formatting settles exactly once without
+    // making live output or chat scrolling wait on a parser.
+    MdText(
+        text = AnnotatedString(rawText),
+        modifier = modifier,
+    )
 }
 
 /**
