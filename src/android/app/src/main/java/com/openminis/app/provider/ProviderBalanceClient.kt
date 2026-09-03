@@ -59,6 +59,14 @@ internal object ProviderBalanceClient {
     }
 
     internal fun extractDisplayValue(json: String, path: String): String {
+        val trimmed = json.trimStart()
+        if (trimmed.startsWith("<!doctype", ignoreCase = true) ||
+            trimmed.startsWith("<html", ignoreCase = true)
+        ) {
+            throw IllegalArgumentException(
+                "Balance endpoint returned HTML. Check the provider base URL and balance API path.",
+            )
+        }
         var current: Any? = unwrapJsonValue(JSONTokener(json).nextValue())
         val normalizedPath = path.trim().removePrefix("$").trimStart('.')
         val tokens = Regex("([^\\[.\\]]+)|\\[(\\d+)]").findAll(normalizedPath).toList()
@@ -156,9 +164,13 @@ internal object ProviderBalanceClient {
         endpoint.toHttpUrlOrNull()?.let { return it }
         val base = instance.customBaseURL?.trim()?.takeIf { it.isNotEmpty() }
             ?: defaultBaseUrl(instance.providerType)
+        return resolveUrl(base, endpoint)
+    }
+
+    internal fun resolveUrl(base: String, endpoint: String): HttpUrl {
         val normalizedBase = "${base.trimEnd('/')}/".toHttpUrlOrNull()
             ?: throw IllegalArgumentException("Provider base URL is invalid")
-        return normalizedBase.resolve(endpoint)
+        return normalizedBase.resolve(endpoint.trimStart('/'))
             ?: throw IllegalArgumentException("Balance API path is invalid")
     }
 
