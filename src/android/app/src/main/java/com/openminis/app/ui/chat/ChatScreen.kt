@@ -6882,39 +6882,44 @@ fun ChatScreen(
                 }
             }
                 if (recIsRecording && !com.openminis.app.ui.chat.voice.VoiceModePrefs.isVoiceActive) {
-                    Surface(
+                    Box(
                         modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .offset(y = (-50).dp)
-                            .width(236.dp)
-                            .height(42.dp),
-                        shape = RoundedCornerShape(21.dp),
-                        color = ChatColors.inputBg,
-                        tonalElevation = 2.dp,
-                        shadowElevation = 5.dp,
+                            .fillMaxWidth()
+                            .offset(y = (-50).dp),
+                        contentAlignment = Alignment.Center,
                     ) {
-                        Row(
-                            modifier = Modifier.padding(start = 16.dp, end = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+                        Surface(
+                            modifier = Modifier
+                                .width(236.dp)
+                                .height(42.dp),
+                            shape = RoundedCornerShape(21.dp),
+                            color = ChatColors.inputBg,
+                            tonalElevation = 2.dp,
+                            shadowElevation = 5.dp,
                         ) {
-                            AudioWaveformView(
-                                levels = recSttLevels,
-                                modifier = Modifier.weight(1f),
-                                barColor = MaterialTheme.colorScheme.primary,
-                                heightDp = 20,
-                                barSpacingDp = 2,
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Icon(
-                                Icons.Default.Stop,
-                                contentDescription = "Stop voice input",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier
-                                    .size(24.dp)
-                                    .clickable {
-                                        com.openminis.app.speech.SpeechRecognitionManager.stopRecording()
-                                    },
-                            )
+                            Row(
+                                modifier = Modifier.padding(start = 16.dp, end = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                AudioWaveformView(
+                                    levels = recSttLevels,
+                                    modifier = Modifier.weight(1f),
+                                    barColor = MaterialTheme.colorScheme.primary,
+                                    heightDp = 20,
+                                    barSpacingDp = 2,
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Icon(
+                                    Icons.Default.Stop,
+                                    contentDescription = "Stop voice input",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .clickable {
+                                            com.openminis.app.speech.SpeechRecognitionManager.stopRecording()
+                                        },
+                                )
+                            }
                         }
                     }
                 }
