@@ -4126,7 +4126,14 @@ fun ChatScreen(
                             } // close UserBubble SideEffect + UserMessageBubble block
                             is FlatChatItem.AssistantHeader -> AssistantHeader()
                             is FlatChatItem.AssistantText -> {
-                                val liveDelta = liveStreamingDelta(viewModel, item.messageId)
+                                // Frozen rows must stay detached from the
+                                // token-rate side channel. Only the active
+                                // streaming row needs live updates.
+                                val liveDelta = if (item.isStreaming) {
+                                    liveStreamingDelta(viewModel, item.messageId)
+                                } else {
+                                    null
+                                }
                                 val liveBlock = liveDelta?.toolBlocks
                                     ?.firstOrNull { it.id == item.block.id }
                                     ?: item.block
@@ -4163,7 +4170,15 @@ fun ChatScreen(
                                 // therefore reads its current fragment from the
                                 // side-channel; completed fragments keep the
                                 // immutable row snapshot they were built with.
-                                val liveDelta = liveStreamingDelta(viewModel, item.messageId)
+                                // `isStreaming` is true only for the trailing
+                                // markdown fragment. Completed fragments keep
+                                // their immutable row snapshot and must not
+                                // subscribe to the token-rate StateFlow.
+                                val liveDelta = if (item.isStreaming) {
+                                    liveStreamingDelta(viewModel, item.messageId)
+                                } else {
+                                    null
+                                }
                                 val liveBlock = liveDelta?.toolBlocks
                                     ?.firstOrNull { it.id == item.parentBlockId }
                                 val liveRawText = if (item.isStreaming && liveBlock != null) {
