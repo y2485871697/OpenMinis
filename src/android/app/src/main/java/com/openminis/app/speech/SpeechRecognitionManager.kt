@@ -308,9 +308,14 @@ object SpeechRecognitionManager {
     }
 
     private fun currentEngine(): SpeechRecognitionEngine? {
-        val byId = engines.firstOrNull { it.id == _selectedEngineId.value }
-        if (byId != null && byId.isAvailable) return byId
-        return engines.firstOrNull { it.isAvailable }
+        // Honour the engine shown in the picker. Silently substituting the
+        // provider when "System Recognition" was selected made the panel lie
+        // about which service handled the audio, and a chat-only endpoint then
+        // surfaced as a confusing provider HTTP 404. Entry points own their
+        // explicit fallback (the platform recognition Activity on OEM ROMs).
+        return engines.firstOrNull {
+            it.id == _selectedEngineId.value && it.isAvailable
+        }
     }
 
     /**
@@ -354,7 +359,6 @@ object SpeechRecognitionManager {
         resetLevels()
         activeCallbacks = onPartialOrFinal to onError
 
-        var callbackEngine = engine
         val sessionToken = Any()
         activeSessionToken = sessionToken
         activeEngine = engine
@@ -383,38 +387,6 @@ object SpeechRecognitionManager {
 
             override fun onError(error: RecognitionError, message: String?) {
                 if (activeSessionToken !== sessionToken) return
-                // A system recognizer can be advertised by an OEM and still
-                // fail at first use. If the user configured a provider ASR,
-                // continue the same tap through it instead of requiring a
-                // second tap or showing the system-activity fallback first.
-                if (error in setOf(
-                        RecognitionError.OEM_NO_SERVICE,
-                        RecognitionError.TRANSCRIPTION_FAILED,
-                        RecognitionError.LANGUAGE_UNSUPPORTED,
-                    ) && callbackEngine?.id == "system"
-                ) {
-                    val providerFallback = engines.firstOrNull {
-                        it.id == "provider" && it.isAvailable
-                    }
-                    if (providerFallback != null) {
-                        Log.i(TAG, "system recognizer unavailable; retrying with provider ASR")
-                        callbackEngine = providerFallback
-                        activeEngine = providerFallback
-                        setState(RecognitionState.STARTING)
-                        try {
-                            providerFallback.start(_locale.value, this)
-                        } catch (fallbackError: Throwable) {
-                            activeSessionToken = null
-                            activeEngine = null
-                            _lastError.value = RecognitionError.UNKNOWN
-                            setState(RecognitionState.IDLE)
-                            resetLevels()
-                            onError(RecognitionError.UNKNOWN, fallbackError.message)
-                            refreshAvailability()
-                        }
-                        return
-                    }
-                }
                 activeSessionToken = null
                 activeEngine = null
                 _lastError.value = error

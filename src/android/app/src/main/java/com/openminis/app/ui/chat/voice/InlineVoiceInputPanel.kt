@@ -175,6 +175,7 @@ fun InlineVoiceInputPanel(
     inputText: String,
     onInputTextChange: (String) -> Unit,
     ensureMicPermission: suspend () -> Boolean,
+    launchSystemDictation: (String) -> Unit = {},
     modifier: Modifier = Modifier,
     // [T-android-correction-context-wiring] Supplies the conversation context
     // for AI correction, built from the chat's current messages. Mirrors iOS
@@ -329,11 +330,19 @@ fun InlineVoiceInputPanel(
         // on prepare/refresh).
         val engineId = if (choice.isSystem) "system" else "provider"
         SpeechRecognitionManager.selectEngine(engineId)
-        (SpeechRecognitionManager.availableEngines()
-            .firstOrNull { it.id == "system" } as? com.openminis.app.speech.SystemSpeechRecognitionEngine)
-            ?.preferOffline = (choice.systemPreferOffline == true)
+        val systemEngine = SpeechRecognitionManager.availableEngines()
+            .firstOrNull { it.id == "system" } as? com.openminis.app.speech.SystemSpeechRecognitionEngine
+        systemEngine?.preferOffline = (choice.systemPreferOffline == true)
         captureBase = transcript
         transcribeError = null
+        // Many Chinese OEM ROMs expose ACTION_RECOGNIZE_SPEECH but do not
+        // provide an embeddable RecognitionService. Use the same platform
+        // Activity flow as Operit-style dictation instead of silently routing
+        // a "System Recognition" selection through a cloud provider.
+        if (choice.isSystem && systemEngine?.isAvailable != true) {
+            launchSystemDictation(captureBase)
+            return
+        }
         SpeechRecognitionManager.startRecording(
             // [T-android-vad] Commit only on a FINAL result.
             //
@@ -360,6 +369,15 @@ fun InlineVoiceInputPanel(
                     com.openminis.app.speech.RecognitionError.NO_MATCH -> {}
                     com.openminis.app.speech.RecognitionError.PERMISSION_DENIED ->
                         permissionDenied = true
+                    com.openminis.app.speech.RecognitionError.OEM_NO_SERVICE,
+                    com.openminis.app.speech.RecognitionError.TRANSCRIPTION_FAILED,
+                    com.openminis.app.speech.RecognitionError.LANGUAGE_UNSUPPORTED,
+                    com.openminis.app.speech.RecognitionError.NETWORK,
+                    com.openminis.app.speech.RecognitionError.UNKNOWN -> if (choice.isSystem) {
+                        launchSystemDictation(captureBase)
+                    } else {
+                        transcribeError = message ?: error.name
+                    }
                     else -> transcribeError = message ?: error.name
                 }
             },

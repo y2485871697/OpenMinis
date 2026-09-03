@@ -5779,6 +5779,7 @@ fun ChatScreen(
                                 viewModel.updateSlashMenuState(text)
                             },
                             ensureMicPermission = { ensureMicPermissionFlow() },
+                            launchSystemDictation = launchSystemDictation,
                             // [T-android-correction-context-wiring] Feed AI
                             // correction the live conversation context. Reads the
                             // FULL message list (not the windowed uiMessages) so
@@ -6473,11 +6474,17 @@ fun ChatScreen(
                                 manager.clearDegradationAndRefresh()
                                 val prefix = viewModel.inputText.value
                                 val separator = if (prefix.isBlank() || prefix.endsWith(' ')) "" else " "
+                                val voiceChoice = providerRepository.resolveVoiceInputChoice()
+                                val selectedEngineId = if (voiceChoice.isSystem) "system" else "provider"
+                                manager.selectEngine(selectedEngineId)
+                                val selectedEngineAvailable = manager.availableEngines()
+                                    .firstOrNull { it.id == selectedEngineId }
+                                    ?.isAvailable == true
                                 // Some OEM ROMs expose a system dictation Activity
                                 // but no embeddable SpeechRecognizer service. Use
                                 // that Activity as the lightweight tap fallback;
                                 // long-press still opens Minis' full voice panel.
-                                if (!manager.isAvailable.value) {
+                                if (voiceChoice.isSystem && !selectedEngineAvailable) {
                                     launchSystemDictation(prefix)
                                     return@launch
                                 }
@@ -6494,8 +6501,10 @@ fun ChatScreen(
                                                 com.openminis.app.speech.RecognitionError.OEM_NO_SERVICE,
                                                 com.openminis.app.speech.RecognitionError.TRANSCRIPTION_FAILED,
                                                 com.openminis.app.speech.RecognitionError.LANGUAGE_UNSUPPORTED,
+                                                com.openminis.app.speech.RecognitionError.NETWORK,
+                                                com.openminis.app.speech.RecognitionError.UNKNOWN,
                                             )
-                                        ) {
+                                        ) && voiceChoice.isSystem) {
                                             launchSystemDictation(prefix)
                                         } else {
                                             android.widget.Toast.makeText(
