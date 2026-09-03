@@ -1745,7 +1745,7 @@ private fun RenderBlock(block: MdBlock) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-                        .padding(start = 12.dp, end = 4.dp, vertical = 2.dp),
+                        .padding(start = 12.dp, top = 2.dp, end = 4.dp, bottom = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(

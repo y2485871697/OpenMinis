@@ -1178,6 +1178,7 @@
     <string name="agent_loop_section_remove">从 Agent 循环中移除</string>
     <string name="agent_loop_section_group_badge">分组</string>
     <string name="chat_menu_new_chat">新建对话</string>
+    <string name="chat_menu_search_messages">搜索记录</string>
     <string name="chat_new_chat_stop_dialog_body">当前对话有任务正在运行，新建对话将停止它。</string>
     <string name="chat_new_chat_stop_dialog_confirm">停止并新建</string>
     <string name="chat_menu_clear_chat">清空对话</string>
