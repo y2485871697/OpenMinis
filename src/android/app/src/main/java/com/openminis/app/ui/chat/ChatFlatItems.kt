@@ -703,7 +703,7 @@ internal fun buildFlatChatItems(
                         // which threw ConcurrentModificationException when the
                         // backing list changed under it. A plain index loop
                         // touches no view.
-                        if (message.isStreaming && isLastText && isLastAssistantTurn) {
+                        if (isLastText && isLastAssistantTurn) {
                             // Keep the live tail as one render unit. Freezing
                             // each completed paragraph while the stream is
                             // active turns a transport burst into a visible
@@ -713,7 +713,7 @@ internal fun buildFlatChatItems(
                             out.add(dedupe(FlatChatItem.AssistantText(
                                 messageId = message.id,
                                 block = block,
-                                isStreaming = true,
+                                isStreaming = message.isStreaming,
                                 messageMarkdown = joinedMarkdown,
                             )))
                         } else {
