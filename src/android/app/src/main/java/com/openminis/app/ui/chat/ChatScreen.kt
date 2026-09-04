@@ -679,7 +679,11 @@ private fun liveStreamingDelta(
                 }
                 val backlog = limit - displayedText.length
                 val release = if (isTableStream.value) {
-                    (codePointsPerFrame + backlog / 6).coerceAtMost(24)
+                    // Tables must visibly grow inside the current cell. Do not
+                    // scale with backlog here: even a short provider row would
+                    // otherwise be consumed in one 32 ms frame and still look
+                    // atomic in a 60/120 Hz UI.
+                    1
                 } else {
                     (codePointsPerFrame + (targetText.length - displayedText.length) / 6)
                         .coerceAtMost(64)

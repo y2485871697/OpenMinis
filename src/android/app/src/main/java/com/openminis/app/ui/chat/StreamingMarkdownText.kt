@@ -1037,11 +1037,12 @@ private fun MarkdownBlockBody(
         val mdColors = currentMdColors()
         val tableShape = streamingTableShape(
             rawText,
-            // While live, hold back an unterminated row until its newline
-            // arrives. At the terminal edge it is a real final row and must
-            // be included, otherwise the last row appears only after the
-            // table has already switched to the frozen renderer.
-            includePartialLastRow = !isStreaming,
+            // The upstream presentation clock already releases this fragment
+            // a few code points at a time. Keep the unfinished last row in the
+            // table so RenderTable can repaint the current cell as that prefix
+            // grows. Dropping it until '\n' turns character streaming into the
+            // visibly wrong "one complete row per tick" behaviour.
+            includePartialLastRow = true,
         )
         val tableKey = tableShape?.prefix?.joinToString("\n") ?: ""
         var visibleRows by remember(tableKey) { mutableStateOf(0) }
@@ -1058,7 +1059,11 @@ private fun MarkdownBlockBody(
             }
         }
         val visibleTableSource = streamingTableSource(tableShape, visibleRows)
-        val latestTableText by rememberUpdatedState(visibleTableSource ?: rawText)
+        // Never bypass the presentation clock with rawText. When the parser
+        // has not produced its first table block yet, rawText may already
+        // contain the entire current row; showing it here makes that row pop
+        // in atomically. Wait for the gated table source instead.
+        val latestTableText by rememberUpdatedState(visibleTableSource.orEmpty())
         var tableBlocks by remember(tableKey) {
             mutableStateOf<List<MdBlock>>(emptyList())
         }
@@ -1079,12 +1084,17 @@ private fun MarkdownBlockBody(
         }
         Column(modifier = modifier) {
             if (tableBlocks.isEmpty()) {
-                Text(
-                    text = visibleTableSource ?: rawText,
-                    fontSize = BaseFontSize,
-                    lineHeight = BaseLineHeight,
-                    color = currentMdColors().text,
-                )
+                // An empty gated source means the async table parse has not
+                // caught up yet. Rendering rawText here would expose the full
+                // current row and defeat the character-paced presentation.
+                if (!visibleTableSource.isNullOrEmpty()) {
+                    Text(
+                        text = visibleTableSource,
+                        fontSize = BaseFontSize,
+                        lineHeight = BaseLineHeight,
+                        color = currentMdColors().text,
+                    )
+                }
             } else {
                 tableBlocks.forEach { block -> RenderBlock(block, isStreaming = true) }
             }
