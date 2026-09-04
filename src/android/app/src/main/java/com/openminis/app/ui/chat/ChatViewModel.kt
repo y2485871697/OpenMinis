@@ -10076,8 +10076,12 @@ class ChatViewModel(
             }
             return
         }
-        // Finish the canonical message and remove its live overlay in the same
-        // state transition. This mirrors RikkaHub's StreamChunk.Finish path.
+        // Publish the terminal snapshot first, but keep the canonical row in
+        // its streaming state for one short render handoff window. Clearing
+        // the overlay in the same frame as writing the complete response lets
+        // Compose switch straight to the full canonical Markdown tree before
+        // the live renderer has painted its final snapshot (the visible
+        // "stalls, then everything appears" failure on fast models/tables).
         val current = _messages.value
         val idx = current.indexOfLast { it.id == id }
         if (idx < 0) {
@@ -10087,12 +10091,31 @@ class ChatViewModel(
         val updated = current.toMutableList()
         updated[idx] = current[idx].copy(
             content = content,
-            isStreaming = false,
+            isStreaming = true,
             toolBlocks = toolBlocks.toList(),
             isAwaitingModelResponse = isAwaitingModelResponse,
         )
         _messages.value = updated
-        clearStreamFlushState(id)
+        enqueueStreamingSnapshot(
+            id,
+            StreamingDelta(
+                content = content,
+                toolBlocks = toolBlocks.toList(),
+                isAwaitingModelResponse = isAwaitingModelResponse,
+                contentStructureKey = streamingContentStructureKey(content),
+            ),
+        )
+        streamingPublishScope.launch {
+            delay(350L)
+            val latest = _messages.value
+            val latestIdx = latest.indexOfLast { it.id == id }
+            if (latestIdx >= 0 && latest[latestIdx].content == content && latest[latestIdx].isStreaming) {
+                val settled = latest.toMutableList()
+                settled[latestIdx] = settled[latestIdx].copy(isStreaming = false)
+                _messages.value = settled
+            }
+            clearStreamFlushState(id)
+        }
     }
 
     /**
