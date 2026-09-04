@@ -19,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -114,7 +115,13 @@ class AnthropicProvider(
         thinkingLevel: ThinkingLevel,
     ): Flow<LLMStreamChunk> = rawStreamMessage(
         messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel,
-    ).failOnSilentEmptyCompletion(name)
+    )
+        // [T-rikkahub-sse-port] rikkahub consumer-side semantics: an UNBOUNDED
+        // stage between the parse loop and the collector so a momentarily slow
+        // collector can never suspend emission and pile deltas into a
+        // catch-up burst. Memory is bounded by a single response's chunks.
+        .buffer(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        .failOnSilentEmptyCompletion(name)
 
     private fun rawStreamMessage(
         messages: List<LLMMessage>,
@@ -141,16 +148,43 @@ class AnthropicProvider(
             headerMap[name] = request.headers[name] ?: ""
         }
 
-        val response = client.newCall(request).execute()
-        val durationMs = System.currentTimeMillis() - startTime
+        // [T-rikkahub-sse-port] rikkahub SSEEventSource semantics: the call is
+        // enqueued and the SSE body is read on OkHttp's dispatcher thread,
+        // pushed line-by-line with trySend into an UNBOUNDED channel — the
+        // socket is never backpressured by the collector (parse loop, StateFlow
+        // publication, Compose recomposition). The old shape (execute() +
+        // BufferedReader on the producer coroutine with suspending send())
+        // stalled the socket whenever the collector lagged a frame, which
+        // surfaced as the "stuck, then everything at once" catch-up burst.
+        // Header-phase logging / non-2xx error mapping run in the onHeaders
+        // hook; awaitHeaders() rethrows exactly where execute() used to.
+        val stream = com.openminis.app.provider.stream.SseLineStream.launch(client, request) { response ->
+            val durationMs = System.currentTimeMillis() - startTime
 
-        if (!response.isSuccessful) {
-            val errorBody = response.body?.string() ?: ""
-            response.close()
-            // T302: skip the LLMRequestLog write entirely on release builds —
-            // see OpenAIProvider for the full rationale (release users never
-            // reach debug.llmRequests, so retaining multi-MB request bodies
-            // there is pure OOM risk for zero benefit).
+            if (!response.isSuccessful) {
+                val errorBody = response.body?.string() ?: ""
+                // T302: skip the LLMRequestLog write entirely on release builds —
+                // see OpenAIProvider for the full rationale (release users never
+                // reach debug.llmRequests, so retaining multi-MB request bodies
+                // there is pure OOM risk for zero benefit).
+                if (com.openminis.app.BuildConfig.DEBUG) {
+                    com.openminis.app.debug.LLMRequestLog.add(
+                        com.openminis.app.debug.LLMRequestLog.Entry(
+                            provider = "anthropic",
+                            requestURL = request.url.toString(),
+                            requestHeaders = headerMap,
+                            requestBody = bodyStr,
+                            durationMs = durationMs,
+                            responseStatusCode = response.code,
+                            responseBody = errorBody.take(2000),
+                        )
+                    )
+                }
+                android.util.Log.e("AnthropicProvider", "Stream failed: ${response.code} isOAuth=$isOAuth body=${errorBody.take(300)}")
+                throw mapHttpError(response.code, errorBody)
+            }
+
+            // Log successful request (debug builds only — see above)
             if (com.openminis.app.BuildConfig.DEBUG) {
                 com.openminis.app.debug.LLMRequestLog.add(
                     com.openminis.app.debug.LLMRequestLog.Entry(
@@ -160,29 +194,11 @@ class AnthropicProvider(
                         requestBody = bodyStr,
                         durationMs = durationMs,
                         responseStatusCode = response.code,
-                        responseBody = errorBody.take(2000),
                     )
                 )
             }
-            android.util.Log.e("AnthropicProvider", "Stream failed: ${response.code} isOAuth=$isOAuth body=${errorBody.take(300)}")
-            throw mapHttpError(response.code, errorBody)
         }
-
-        // Log successful request (debug builds only — see above)
-        if (com.openminis.app.BuildConfig.DEBUG) {
-            com.openminis.app.debug.LLMRequestLog.add(
-                com.openminis.app.debug.LLMRequestLog.Entry(
-                    provider = "anthropic",
-                    requestURL = request.url.toString(),
-                    requestHeaders = headerMap,
-                    requestBody = bodyStr,
-                    durationMs = durationMs,
-                    responseStatusCode = response.code,
-                )
-            )
-        }
-
-        val reader = BufferedReader(InputStreamReader(response.body!!.byteStream()))
+        stream.awaitHeaders()
         // Track current tool_use block being streamed
         var currentToolId: String? = null
         var currentToolName: String? = null
@@ -190,7 +206,7 @@ class AnthropicProvider(
 
         try {
             var line: String?
-            while (reader.readLine().also { line = it } != null) {
+            while (stream.readLine().also { line = it } != null) {
                 val l = line ?: continue
                 if (!l.startsWith("data: ")) continue
                 val payload = l.removePrefix("data: ")
@@ -265,11 +281,14 @@ class AnthropicProvider(
         } catch (e: Exception) {
             cancel("Stream error", mapError(e))
         } finally {
-            reader.close()
-            response.close()
+            stream.close()
         }
         channel.close()
-        awaitClose()
+        awaitClose {
+            // [T-rikkahub-sse-port] user stop / generation supersede: cancel
+            // the call so the transport's reader thread unwinds immediately.
+            stream.close()
+        }
     }
 
     /**

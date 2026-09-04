@@ -24,6 +24,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
@@ -636,7 +637,16 @@ class OpenAIProvider private constructor(
         thinkingLevel: ThinkingLevel,
     ): Flow<LLMStreamChunk> = rawStreamMessage(
         messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel,
-    ).failOnSilentEmptyCompletion(name)
+    )
+        // [T-rikkahub-sse-port] rikkahub consumer-side semantics (trySend +
+        // generous buffering): an UNBOUNDED stage between the parse loop and
+        // the collector means a momentarily slow collector (Compose frame,
+        // thinking-delta Main hop) can never suspend emission and pile deltas
+        // into a catch-up burst. Memory is bounded by a single response's
+        // chunk volume — the same bytes the socket would have buffered under
+        // backpressure anyway.
+        .buffer(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        .failOnSilentEmptyCompletion(name)
 
     private fun rawStreamMessage(
         messages: List<LLMMessage>,
@@ -744,7 +754,80 @@ class OpenAIProvider private constructor(
         // watchdog below can (a) start the TTFB clock only after upload and
         // (b) evict THIS ONE connection on timeout.
         val watchState = CallWatchState()
-        val call = client.newCall(request.newBuilder().tag(CallWatchState::class.java, watchState).build())
+        val ttfbTimedOut = java.util.concurrent.atomic.AtomicBoolean(false)
+        val headersArrived = java.util.concurrent.atomic.AtomicBoolean(false)
+        val callStartNanos = System.nanoTime()
+        // [T-rikkahub-sse-port] rikkahub SSEEventSource semantics: the call is
+        // enqueued and the SSE body is read on OkHttp's dispatcher thread,
+        // pushed line-by-line with trySend into an UNBOUNDED channel. The old
+        // shape (execute() + BufferedReader on this coroutine, suspending
+        // send() into a 64-slot callbackFlow channel) backpressured the socket
+        // whenever the collector lagged a frame: the read loop stalled, TCP
+        // buffers piled up, and the UI showed exactly the reported "stuck,
+        // then everything at once" catch-up burst. Reading on the network
+        // thread with an unbounded line channel decouples socket draining
+        // from consumer speed permanently. The CallWatchState tag and the
+        // TTFB watchdog's call reference are preserved verbatim; the
+        // transport flips `headersArrived` on the OkHttp thread the moment
+        // headers land, so watchdog timing is unchanged. The T321 response
+        // logging + non-2xx error mapping run in the onHeaders hook below.
+        val stream = com.openminis.app.provider.stream.SseLineStream.launch(
+            client,
+            request.newBuilder().tag(CallWatchState::class.java, watchState).build(),
+            headersArrived,
+        ) { response ->
+            // T321: response-side diagnostic log (status + select header values).
+            run {
+                val rh = response.headers
+                val ct = rh["content-type"] ?: ""
+                val rid = rh["x-request-id"] ?: rh["openai-request-id"] ?: ""
+                val openAiHdrs = rh.names().filter { it.lowercase().startsWith("openai-") }
+                com.openminis.app.logging.AppLogger.info(
+                    "OpenAIProvider",
+                    "[T321] ← RSP status=${response.code} content-type=$ct x-request-id=$rid " +
+                        "headerKeys=${rh.names()} openAiHeaders=${openAiHdrs.associateWith { rh[it] ?: "" }}"
+                )
+            }
+            if (!response.isSuccessful) {
+                val errorBody = response.body?.string() ?: ""
+                // T321: full error body — debug-only, but kept unconditional here
+                // since non-2xx is rare and the body is critical for diagnosis.
+                com.openminis.app.logging.AppLogger.error(
+                    "OpenAIProvider",
+                    "[T321] ← HTTP ${response.code} error body: $errorBody"
+                )
+                // T302: skip the LLMRequestLog write entirely on release builds —
+                // not just to avoid the (already-truncated) retention cost, but to
+                // dodge constructing the Entry / headerMap copies that go with it.
+                if (com.openminis.app.BuildConfig.DEBUG) {
+                    com.openminis.app.debug.LLMRequestLog.add(
+                        com.openminis.app.debug.LLMRequestLog.Entry(
+                            provider = "openai",
+                            requestURL = request.url.toString(),
+                            requestHeaders = headerMap,
+                            requestBody = bodyStr,
+                            durationMs = System.currentTimeMillis() - startTime,
+                            responseStatusCode = response.code,
+                            responseBody = errorBody.take(2000),
+                        )
+                    )
+                }
+                throw mapHttpError(response.code, errorBody)
+            }
+            if (com.openminis.app.BuildConfig.DEBUG) {
+                com.openminis.app.debug.LLMRequestLog.add(
+                    com.openminis.app.debug.LLMRequestLog.Entry(
+                        provider = "openai",
+                        requestURL = request.url.toString(),
+                        requestHeaders = headerMap,
+                        requestBody = bodyStr,
+                        durationMs = System.currentTimeMillis() - startTime,
+                        responseStatusCode = response.code,
+                    )
+                )
+            }
+        }
+        val call = stream.call
         // [T-android-stale-conn-retry-hang] Time-to-first-byte watchdog. A
         // request written into a dead pooled h2 tunnel (local proxy socket
         // survives a network flap) produces NO further events — no headers,
@@ -762,9 +845,6 @@ class OpenAIProvider private constructor(
         // auto-retry gets a fresh one (a sibling session's connection is never
         // touched — no evictAll). Once headers arrive the watchdog stops and a
         // flowing SSE stream has NO total-duration limit, as before.
-        val ttfbTimedOut = java.util.concurrent.atomic.AtomicBoolean(false)
-        val headersArrived = java.util.concurrent.atomic.AtomicBoolean(false)
-        val callStartNanos = System.nanoTime()
         val ttfbWatchdog = launch {
             val pollMs = 250L
             var timedOutPhase: String? = null
@@ -800,8 +880,14 @@ class OpenAIProvider private constructor(
                 }
             }
         }
-        val response = try {
-            call.execute()
+        // [T-rikkahub-sse-port] awaitHeaders() resumes at the exact point
+        // call.execute() used to return: the transport already ran the T321
+        // response logging + non-2xx error mapping (mapHttpError) inside the
+        // onHeaders hook above, so a non-2xx surfaces here as the same thrown
+        // LLMError, and an OkHttp failure as the same IOException (with the
+        // TTFB-watchdog TransientError translation kept verbatim).
+        try {
+            stream.awaitHeaders()
         } catch (e: IOException) {
             if (ttfbTimedOut.get()) {
                 throw LLMError.TransientError(
@@ -813,59 +899,6 @@ class OpenAIProvider private constructor(
             headersArrived.set(true)
             ttfbWatchdog.cancel()
         }
-        // T321: response-side diagnostic log (status + select header values).
-        run {
-            val rh = response.headers
-            val ct = rh["content-type"] ?: ""
-            val rid = rh["x-request-id"] ?: rh["openai-request-id"] ?: ""
-            val openAiHdrs = rh.names().filter { it.lowercase().startsWith("openai-") }
-            com.openminis.app.logging.AppLogger.info(
-                "OpenAIProvider",
-                "[T321] ← RSP status=${response.code} content-type=$ct x-request-id=$rid " +
-                    "headerKeys=${rh.names()} openAiHeaders=${openAiHdrs.associateWith { rh[it] ?: "" }}"
-            )
-        }
-        if (!response.isSuccessful) {
-            val errorBody = response.body?.string() ?: ""
-            // T321: full error body — debug-only, but kept unconditional here
-            // since non-2xx is rare and the body is critical for diagnosis.
-            com.openminis.app.logging.AppLogger.error(
-                "OpenAIProvider",
-                "[T321] ← HTTP ${response.code} error body: $errorBody"
-            )
-            response.close()
-            // T302: skip the LLMRequestLog write entirely on release builds —
-            // not just to avoid the (already-truncated) retention cost, but to
-            // dodge constructing the Entry / headerMap copies that go with it.
-            if (com.openminis.app.BuildConfig.DEBUG) {
-                com.openminis.app.debug.LLMRequestLog.add(
-                    com.openminis.app.debug.LLMRequestLog.Entry(
-                        provider = "openai",
-                        requestURL = request.url.toString(),
-                        requestHeaders = headerMap,
-                        requestBody = bodyStr,
-                        durationMs = System.currentTimeMillis() - startTime,
-                        responseStatusCode = response.code,
-                        responseBody = errorBody.take(2000),
-                    )
-                )
-            }
-            throw mapHttpError(response.code, errorBody)
-        }
-        if (com.openminis.app.BuildConfig.DEBUG) {
-            com.openminis.app.debug.LLMRequestLog.add(
-                com.openminis.app.debug.LLMRequestLog.Entry(
-                    provider = "openai",
-                    requestURL = request.url.toString(),
-                    requestHeaders = headerMap,
-                    requestBody = bodyStr,
-                    durationMs = System.currentTimeMillis() - startTime,
-                    responseStatusCode = response.code,
-                )
-            )
-        }
-
-        val reader = BufferedReader(InputStreamReader(response.body!!.byteStream()))
 
         // [T-codex-gpt-image2-oauth-android] gpt-image-2: the Codex backend
         // streams the image as a base64 blob (PNG / JPEG / WebP) inside the SSE
@@ -875,19 +908,17 @@ class OpenAIProvider private constructor(
         // chunk, and finishes — bypassing the chat/tool SSE state machine below.
         if (isCodexImageModel) {
             try {
-                handleCodexImageStream(reader) { chunk -> trySend(chunk) }
+                handleCodexImageStream(stream) { chunk -> trySend(chunk) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 cancel("Image stream error", mapError(e))
             } finally {
-                reader.close()
-                response.close()
+                stream.close()
             }
             channel.close()
             awaitClose {
-                try { call.cancel() } catch (_: Exception) {}
-                try { response.close() } catch (_: Exception) {}
+                stream.close()
             }
             return@callbackFlow
         }
@@ -945,7 +976,7 @@ class OpenAIProvider private constructor(
             // Branch streaming parser based on API format
             val isResponsesAPI = !usesChatCompletionsAPI
 
-            while (reader.readLine().also { line = it } != null) {
+            while (stream.readLine().also { line = it } != null) {
                 val l = line ?: continue
                 // Tolerate `data:` with or without the optional space — the
                 // HTML5 SSE spec only treats one leading space as ignorable,
@@ -1491,18 +1522,15 @@ class OpenAIProvider private constructor(
             )
             cancel("Stream error", mapError(e))
         } finally {
-            reader.close()
-            response.close()
+            stream.close()
         }
         channel.close()
         // T171: when the coroutine is cancelled (user tapped stop), the
-        // reader loop above is suspended inside the OkHttp source — only
-        // call.cancel() will tear the socket down promptly. response.close()
-        // is also explicit so connection-pool leaks are impossible if cancel
-        // races with the finally block.
+        // transport's OkHttp reader thread is mid-read on the socket — only
+        // call.cancel() (via stream.close()) will tear it down promptly.
+        // stream.close() is idempotent, so racing the finally above is safe.
         awaitClose {
-            try { call.cancel() } catch (_: Exception) {}
-            try { response.close() } catch (_: Exception) {}
+            stream.close()
         }
     }
 
@@ -2666,7 +2694,7 @@ class OpenAIProvider private constructor(
      * Never logs the token (the SSE body carries no Authorization).
      */
     private suspend fun handleCodexImageStream(
-        reader: BufferedReader,
+        reader: com.openminis.app.provider.stream.SseLineStream,
         emit: (LLMStreamChunk) -> Unit,
     ) {
         var b64Result: String? = null

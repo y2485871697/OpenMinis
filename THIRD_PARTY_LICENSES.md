@@ -43,6 +43,12 @@ Transitive packages (pinned in `Package.resolved`), all **Apache-2.0**, maintain
 
 Test-only dependencies: JUnit 4.13.2 (**EPL-1.0**), MockWebServer 4.12.0 (**Apache-2.0**), kotlinx-coroutines-test 1.9.0 (**Apache-2.0**), org.json 20231013 (**Public Domain / JSON License**).
 
+## Ported source snippets
+
+| Source | Ported into | License | Notes |
+|---|---|---|---|
+| [rikkahub](https://github.com/rikkahub/rikkahub) — `me.rerere.ai.util.SSEEventSource` | Android `provider/stream/SseLineStream.kt` (async SSE line transport used by OpenAI / Anthropic / Gemini providers) | **GPL-3.0** | Port of rikkahub's enqueue-based SSE transport semantics: the response body is read on the OkHttp dispatcher thread and pushed with `trySend` into an unbounded channel so socket draining is never backpressured by the consumer. See the file's KDoc for the behavioural rationale (fixes the streaming "stuck, then burst" symptom). OpenMinis is GPL-3.0, so the port is license-compatible. |
+
 ## Bundled web/UI assets
 
 | Asset | Location | License |

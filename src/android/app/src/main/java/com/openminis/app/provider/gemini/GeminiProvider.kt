@@ -19,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -94,7 +95,13 @@ class GeminiProvider(
         thinkingLevel: ThinkingLevel,
     ): Flow<LLMStreamChunk> = rawStreamMessage(
         messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel,
-    ).failOnSilentEmptyCompletion(name)
+    )
+        // [T-rikkahub-sse-port] rikkahub consumer-side semantics: an UNBOUNDED
+        // stage between the parse loop and the collector so a momentarily slow
+        // collector can never suspend emission and pile deltas into a
+        // catch-up burst. Memory is bounded by a single response's chunks.
+        .buffer(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        .failOnSilentEmptyCompletion(name)
 
     private fun rawStreamMessage(
         messages: List<LLMMessage>,
@@ -115,19 +122,27 @@ class GeminiProvider(
             .applyUserAgentOverride(null)
             .build()
 
-        val response = client.newCall(request).execute()
-        if (!response.isSuccessful) {
-            val errorBody = response.body?.string() ?: ""
-            response.close()
-            throw mapHttpError(response.code, errorBody)
+        // [T-rikkahub-sse-port] rikkahub SSEEventSource semantics: the call is
+        // enqueued and the SSE body is read on OkHttp's dispatcher thread,
+        // pushed line-by-line with trySend into an UNBOUNDED channel — the
+        // socket is never backpressured by the collector. The old shape
+        // (execute() + BufferedReader on the producer coroutine with
+        // suspending send()) stalled the socket whenever the collector lagged
+        // a frame, surfacing as the "stuck, then everything at once"
+        // catch-up burst. Non-2xx mapping runs in the onHeaders hook;
+        // awaitHeaders() rethrows exactly where execute() used to.
+        val stream = com.openminis.app.provider.stream.SseLineStream.launch(client, request) { response ->
+            if (!response.isSuccessful) {
+                val errorBody = response.body?.string() ?: ""
+                throw mapHttpError(response.code, errorBody)
+            }
         }
-
-        val reader = BufferedReader(InputStreamReader(response.body!!.byteStream()))
+        stream.awaitHeaders()
         try {
             var started = false
             var lastFinishReason: String? = null
             var line: String?
-            while (reader.readLine().also { line = it } != null) {
+            while (stream.readLine().also { line = it } != null) {
                 val l = line ?: continue
                 if (!l.startsWith("data: ")) continue
                 val payload = l.removePrefix("data: ")
@@ -171,11 +186,14 @@ class GeminiProvider(
         } catch (e: Exception) {
             cancel("Stream error", mapError(e))
         } finally {
-            reader.close()
-            response.close()
+            stream.close()
         }
         channel.close()
-        awaitClose()
+        awaitClose {
+            // [T-rikkahub-sse-port] user stop / generation supersede: cancel
+            // the call so the transport's reader thread unwinds immediately.
+            stream.close()
+        }
     }
 
     private fun buildRequestBody(
