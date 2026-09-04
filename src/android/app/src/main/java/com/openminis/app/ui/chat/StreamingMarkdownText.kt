@@ -2839,18 +2839,6 @@ private fun RenderTable(block: MdBlock.Table) {
                 copyTableImage = {
                     tableScope.launch {
                         try {
-                            // [T-android-table-layer-cap] Oversized tables skip
-                            // layer recording (see the drawWithContent below), so
-                            // the captured bitmap would be blank — degrade to
-                            // copying the markdown text instead of producing a
-                            // broken image.
-                            if (tableLayerOversized) {
-                                val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                                    as android.content.ClipboardManager
-                                cm.setPrimaryClip(android.content.ClipData.newPlainText("table", block.raw))
-                                Toast.makeText(context, tableCopiedToast, Toast.LENGTH_SHORT).show()
-                                return@launch
-                            }
                             val imageBitmap = tableGraphicsLayer.toImageBitmap()
                             val androidBitmap = imageBitmap.asAndroidBitmap()
                             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
