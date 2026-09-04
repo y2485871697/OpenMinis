@@ -664,7 +664,11 @@ class ChatViewModel(
     // boundary; this prevents a fast SSE connection from enqueueing hundreds
     // of Compose invalidations while preserving the latest text.
     private val streamingPublishScope = kotlinx.coroutines.CoroutineScope(
-        SupervisorJob() + Dispatchers.Main.immediate,
+        // Provider bursts must not queue delayed publication work behind
+        // Compose measurement/layout on the main thread. StateFlow updates
+        // are thread-safe; keep the coalescing clock off-main and let the
+        // renderer observe the latest immutable snapshot normally.
+        SupervisorJob() + Dispatchers.Default,
     )
     private val streamingPublishLock = Any()
     private val pendingStreamingSnapshots = mutableMapOf<String, StreamingDelta>()
