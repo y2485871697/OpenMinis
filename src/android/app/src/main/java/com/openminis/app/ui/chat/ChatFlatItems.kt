@@ -736,7 +736,7 @@ internal fun buildFlatChatItems(
                                 isStreaming = message.isStreaming && isLastText,
                                 messageMarkdown = joinedMarkdown,
                             )))
-                            continue@forEachIndexed
+                            return@forEachIndexed
                         }
                         val fragments = coalesceMarkdownFragments(rawFragments)
                         if (fragments.isEmpty()) {
