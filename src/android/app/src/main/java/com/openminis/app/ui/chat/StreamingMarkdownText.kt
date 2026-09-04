@@ -558,7 +558,18 @@ private fun StreamingMarkdownTextBody(
     // when a new stream fragment mounts, so deltas accumulate and then appear
     // in a burst. snapshotFlow emits the current value immediately; the first
     // parse still happens without blocking the UI thread.
-    var blocks by remember { mutableStateOf<List<MdBlock>>(emptyList()) }
+    var blocks by remember {
+        // [T-android-stream-arrival-pace] RikkaHub parses the FIRST snapshot
+        // synchronously in the initial composition state, so a live row never
+        // opens as a raw-markdown preview before the async pipeline lands.
+        mutableStateOf(
+            if (content.length <= COLD_PARSE_SYNC_CHARS && content.isNotBlank()) {
+                MarkdownParseCaches.blocks(content)
+            } else {
+                emptyList()
+            }
+        )
+    }
     LaunchedEffect(mdColors) {
         snapshotFlow { latestContent }
             .distinctUntilChanged()
@@ -877,6 +888,25 @@ private fun MarkdownBlockBody(
             }
             return
         }
+        // [T-android-stream-end-raw-flash] Small frozen fragments parse
+        // SYNCHRONOUSLY on a cache miss. The off-main path below shows a
+        // raw-markdown Text preview for one to several frames before the
+        // parsed blocks swap in — at stream end / next-turn start the flat
+        // rows re-key from the live fragment set to the coalesced set, EVERY
+        // row misses at once, and the user sees the reply flash as raw
+        // `##`/`**`/`|---|` text over the parsed tables (2026-09-05
+        // recordings). A ≤16 KB fragment is a low-single-digit-ms job for the
+        // line-based block splitter (inline scanning deliberately NOT done
+        // here — that was the 2026-07-09 ANR path; inline caches fill
+        // lazily for the visible viewport instead). Pay it once per distinct
+        // fragment (then cached) rather than flashing raw text.
+        if (rawText.length <= COLD_PARSE_SYNC_CHARS) {
+            val parsedSync = remember(rawText) { MarkdownParseCaches.blocks(rawText) }
+            Column(modifier = modifier) {
+                parsedSync.forEach { RenderBlock(it) }
+            }
+            return
+        }
         val mdColors = currentMdColors()
         var parsed by remember(rawText) { mutableStateOf<List<MdBlock>?>(null) }
         LaunchedEffect(rawText) {
@@ -942,7 +972,18 @@ private fun MarkdownBlockBody(
     // runBlocking parse here stalls the main thread and lets provider deltas
     // pile up before Compose can draw them. Start empty and let the initial
     // snapshotFlow emission populate it on Dispatchers.Default.
-    var blocks by remember { mutableStateOf<List<MdBlock>>(emptyList()) }
+    var blocks by remember {
+        // [T-android-stream-arrival-pace] Same first-frame parity as
+        // [StreamingMarkdownTextBody]: parse the initial snapshot inline so
+        // the live fragment never opens as a raw-text preview.
+        mutableStateOf(
+            if (rawText.length <= COLD_PARSE_SYNC_CHARS && rawText.isNotBlank()) {
+                MarkdownParseCaches.blocks(rawText)
+            } else {
+                emptyList()
+            }
+        )
+    }
     LaunchedEffect(mdColors) {
         snapshotFlow { latestText }
             .distinctUntilChanged()
@@ -983,11 +1024,20 @@ private const val LIVE_FRAGMENT_TAIL_CHARS = 3_000
 
 /**
  * [T-android-coldload-offmain-parse] A FROZEN fragment above this size whose
- * block parse would be a cache MISS parses off-main (with a plain-text
- * preview in the meantime) instead of synchronously in composition. Below
- * it the parse is sub-ms and the placeholder swap would flicker for nothing.
+ * block parse would be a cache MISS parses off-main (with a plain-text preview
+ * in the meantime) instead of synchronously in composition. Below it the parse
+ * is sub-ms and the placeholder swap would flicker for nothing.
  */
 private const val COLD_PARSE_PREVIEW_CHARS = 4_000
+
+/**
+ * [T-android-stream-end-raw-flash] Frozen fragments at or below this size
+ * parse synchronously in composition on a cache miss (see the frozen branch
+ * in [MarkdownBlockBody]). Deliberately far below the sizes where the block
+ * splitter's cost becomes frame-visible, and far above any coalesced fragment
+ * `coalesceMarkdownFragments` produces at its default 2000-char budget.
+ */
+private const val COLD_PARSE_SYNC_CHARS = 16_000
 
 /**
  * [T-android-coldload-offmain-parse] Composition-snapshot prewarmer for the

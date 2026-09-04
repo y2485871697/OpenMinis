@@ -534,21 +534,25 @@ private fun toolBlocksForFloatingBar(
     return result
 }
 
+/**
+ * [T-android-stream-arrival-pace] Sampled view of the live streaming delta
+ * for one message, published at most once per display frame. RikkaHub parity:
+ * the received snapshot is rendered AT ARRIVAL SPEED — there is no typewriter.
+ *
+ * The typewriter (fixed 2 cp/frame, later an adaptive backlog drain) was
+ * removed after the 2026-09-05 captures: against a gateway that delivers a
+ * whole table reply in a few seconds, ANY pacing layer either trails the
+ * transport (felt as "stuck, then everything at once") or drains so fast the
+ * pacing is invisible while still adding backlog mechanics (prefix-jump
+ * fallback, drain bursts, 0-height empties). Rendering the latest snapshot
+ * directly matches RikkaHub's renderer and keeps the perceived speed equal
+ * to the provider's actual send speed.
+ */
 @OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
 private fun liveStreamingDelta(
     viewModel: ChatViewModel,
     messageId: String,
-    /**
-     * When set, smooth the text block identified by this id. Provider SSE
-     * chunks are transport-sized, not display-sized: a gateway can deliver
-     * several hundred characters in one read. RikkaHub keeps the received
-     * snapshot separate from the text currently painted, so a burst is
-     * released over display frames instead of appearing as a whole paragraph.
-     */
-    animateTextBlockId: String? = null,
-    fallbackTarget: StreamingDelta? = null,
-    presentationActive: Boolean = true,
 ): StreamingDelta? {
     val flow = remember(viewModel, messageId) {
         // Publish at most once per display frame. Provider SSE chunks can be
@@ -560,102 +564,7 @@ private fun liveStreamingDelta(
             .sample(16L)
     }
     val target by flow.collectAsState(initial = null)
-    val currentTarget = target ?: fallbackTarget ?: return null
-    if (animateTextBlockId == null) return currentTarget
-
-    val targetBlockText = currentTarget.toolBlocks
-        .firstOrNull { it.id == animateTextBlockId && it.kind == "text" }
-        ?.content
-        ?: currentTarget.content
-    var displayedText by remember(messageId, animateTextBlockId) {
-        mutableStateOf("")
-    }
-    // Keep the presentation loop alive while transport snapshots change. A
-    // rememberUpdatedState gives the loop the newest target without putting
-    // that target in LaunchedEffect's key set (which would cancel/restart the
-    // typewriter on every provider chunk).
-    val latestTargetText = rememberUpdatedState(targetBlockText)
-    val hasLiveTarget = rememberUpdatedState(target != null)
-
-    // Provider reads can contain a whole paragraph after a network pause. The
-    // received snapshot is the buffer; this fixed frame-paced loop is the
-    // presentation clock. It deliberately releases a constant two Unicode
-    // code points every ~32ms instead of speeding up for larger backlogs, so
-    // a slow/fast network cannot turn into visible bursts or variable typing
-    // speed. A long UI frame is capped to one release, never a catch-up burst.
-    LaunchedEffect(messageId, animateTextBlockId, presentationActive) {
-        val frameIntervalNs = 32_000_000L
-        val codePointsPerFrame = 2
-        var previousFrameNs = 0L
-        var elapsedNs = 0L
-        while (true) {
-            // After transport ends, wait for the side-channel to drain and
-            // stop only after the canonical final snapshot catches up with
-            // the text already painted on screen.
-            val terminalTarget = latestTargetText.value
-            if (!presentationActive &&
-                !hasLiveTarget.value &&
-                terminalTarget.startsWith(displayedText) &&
-                displayedText.length >= terminalTarget.length
-            ) {
-                break
-            }
-            withFrameNanos { nowNs ->
-                if (previousFrameNs != 0L) {
-                    elapsedNs = (elapsedNs + (nowNs - previousFrameNs))
-                        .coerceAtMost(frameIntervalNs * 2)
-                }
-                previousFrameNs = nowNs
-            }
-            val targetText = latestTargetText.value
-            if (!targetText.startsWith(displayedText)) {
-                // A retry/replacement is a new prefix; never expose a stale
-                // fragment, but also do not replay it character by character.
-                displayedText = targetText
-                elapsedNs = 0L
-            } else if (elapsedNs >= frameIntervalNs && displayedText.length < targetText.length) {
-                elapsedNs -= frameIntervalNs
-                // [T-android-stream-burst] Adaptive release. A fixed 2 code
-                // points per frame (~62 cps) cannot keep up with a fast
-                // gateway: the 2026-09-05 table-streaming capture shows
-                // deepseek-v4-flash delivering 2172 chars in ~6 s (313 SSE
-                // chunks in one second). The backlog then either trails the
-                // transport by half a minute or snaps forward through the
-                // non-prefix fallback below — the user sees "everything
-                // appears at once". Drain the backlog over a ~3 s window
-                // instead: 12 cp/frame ceiling ≈ 750 cps floor removal, so
-                // the visible stream tracks the provider while still reading
-                // as streaming, and the fallback jump almost never fires.
-                val backlog = targetText.length - displayedText.length
-                val release = (backlog / 180).coerceIn(codePointsPerFrame, 12)
-                var next = displayedText.length
-                repeat(release) {
-                    if (next < targetText.length) {
-                        next = targetText.offsetByCodePoints(next, 1)
-                    }
-                }
-                displayedText = targetText.substring(0, next)
-            } else if (elapsedNs >= frameIntervalNs) {
-                // No pending text: discard accumulated time so the first new
-                // chunk starts on the normal cadence instead of jumping.
-                elapsedNs = 0L
-            }
-        }
-    }
-
-    val renderedText = if (targetBlockText.startsWith(displayedText)) {
-        displayedText
-    } else {
-        targetBlockText
-    }
-    val displayedBlocks = currentTarget.toolBlocks.map { block ->
-        if (block.id == animateTextBlockId && block.kind == "text") {
-            block.copy(content = renderedText)
-        } else {
-            block
-        }
-    }
-    return currentTarget.copy(toolBlocks = displayedBlocks)
+    return target
 }
 
 @OptIn(ExperimentalMaterial3Api::class, kotlinx.coroutines.FlowPreview::class)
@@ -4303,33 +4212,16 @@ fun ChatScreen(
                             } // close UserBubble SideEffect + UserMessageBubble block
                             is FlatChatItem.AssistantHeader -> AssistantHeader()
                             is FlatChatItem.AssistantText -> {
-                                // Keep the presenter alive after transport
-                                // ends. The row identity remains stable, so
-                                // its displayed prefix can continue toward
-                                // the canonical final message without a
-                                // full-snapshot jump.
-                                var wasStreaming by remember(item.messageId, item.block.id) {
-                                    mutableStateOf(false)
-                                }
-                                if (item.isStreaming) wasStreaming = true
-                                val shouldPresent = item.isStreaming || wasStreaming
-                                val fallbackTarget = if (shouldPresent) {
-                                    StreamingDelta(
-                                        content = item.messageMarkdown,
-                                        toolBlocks = listOf(item.block),
-                                        isAwaitingModelResponse = false,
-                                    )
-                                } else {
-                                    null
-                                }
-                                val liveDelta = if (shouldPresent) {
-                                    liveStreamingDelta(
-                                        viewModel,
-                                        item.messageId,
-                                        animateTextBlockId = item.block.id,
-                                        fallbackTarget = fallbackTarget,
-                                        presentationActive = item.isStreaming,
-                                    )
+                                // [T-android-stream-arrival-pace] rikkahub
+                                // parity: the live row renders the latest
+                                // received snapshot at arrival speed (no
+                                // typewriter, no post-stream catch-up). After
+                                // the transport drains, the side-channel is
+                                // cleared and liveDelta becomes null — the
+                                // row falls back to item.block, which by then
+                                // IS the canonical final content.
+                                val liveDelta = if (item.isStreaming) {
+                                    liveStreamingDelta(viewModel, item.messageId)
                                 } else {
                                     null
                                 }
@@ -4375,11 +4267,7 @@ fun ChatScreen(
                                 // their immutable row snapshot and must not
                                 // subscribe to the token-rate StateFlow.
                                 val liveDelta = if (item.isStreaming) {
-                                    liveStreamingDelta(
-                                        viewModel,
-                                        item.messageId,
-                                        animateTextBlockId = item.parentBlockId,
-                                    )
+                                    liveStreamingDelta(viewModel, item.messageId)
                                 } else {
                                     null
                                 }
