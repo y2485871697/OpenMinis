@@ -554,6 +554,7 @@ private fun StreamingMarkdownTextBody(
     // snapshot instead of building an unbounded queue of obsolete prefixes.
     val latestContent by rememberUpdatedState(content)
     val mdColors = currentMdColors()
+    val nodeBuffer = remember { StreamingMarkdownNodeBuffer() }
     // Do not synchronously parse the whole assistant reply during
     // composition. A runBlocking parse here stalls the main thread exactly
     // when a new stream fragment mounts, so deltas accumulate and then appear
@@ -578,7 +579,9 @@ private fun StreamingMarkdownTextBody(
             // before the expensive Markdown parse could leave a fast-model
             // table waiting behind one long parse and only repaint at finish.
             .sample(50L)
-            .map { snapshot -> parseStreamingMarkdownBlocks(snapshot, mdColors) }
+            .map { snapshot ->
+                parseStreamingMarkdownBlocks(snapshot, mdColors, nodeBuffer.update(snapshot))
+            }
             .flowOn(Dispatchers.Default)
             .catch { error ->
                 if (error is kotlinx.coroutines.CancellationException) throw error
@@ -972,6 +975,7 @@ private fun MarkdownBlockBody(
     // prefixes must not accumulate behind the parser.
     val latestText by rememberUpdatedState(rawText)
     val mdColors = currentMdColors()
+    val nodeBuffer = remember { StreamingMarkdownNodeBuffer() }
     // The live fragment is mounted from the LazyColumn composition path. A
     // runBlocking parse here stalls the main thread and lets provider deltas
     // pile up before Compose can draw them. Start empty and let the initial
@@ -992,7 +996,9 @@ private fun MarkdownBlockBody(
         snapshotFlow { latestText }
             .distinctUntilChanged()
             .sample(50L)
-            .map { snapshot -> parseStreamingMarkdownBlocks(snapshot, mdColors) }
+            .map { snapshot ->
+                parseStreamingMarkdownBlocks(snapshot, mdColors, nodeBuffer.update(snapshot))
+            }
             .flowOn(Dispatchers.Default)
             .catch { error ->
                 if (error is kotlinx.coroutines.CancellationException) throw error
@@ -1082,12 +1088,13 @@ private fun parseMarkdownBlocksBlocking(content: String): List<MdBlock> =
 private suspend fun parseStreamingMarkdownBlocks(
     content: String,
     colors: MdColors,
+    fragments: List<String>? = null,
 ): List<MdBlock> {
-    val fragments = splitMarkdownIntoBlockTexts(content)
-    if (fragments.isEmpty()) return emptyList()
-    val lastIndex = fragments.lastIndex
+    val parsedFragments = fragments ?: splitMarkdownIntoBlockTexts(content)
+    if (parsedFragments.isEmpty()) return emptyList()
+    val lastIndex = parsedFragments.lastIndex
     val result = ArrayList<MdBlock>()
-    fragments.forEachIndexed { index, fragment ->
+    parsedFragments.forEachIndexed { index, fragment ->
         val parsed = if (index == lastIndex) {
             parseMarkdownBlocks(fragment)
         } else {
