@@ -559,23 +559,12 @@ private fun StreamingMarkdownTextBody(
     // ends, [isStreaming] flips false and the frozen item is re-rendered as
     // full Markdown (via the cache or off-main parse below).
     if (isStreaming) {
-        // Keep the one stable message item, but switch its interior to the
-        // incremental table renderer as soon as a real header/separator pair
-        // exists. The previous unconditional plain Text path meant the new
-        // stable-item lifecycle could never show a live table at all.
-        if (looksLikeMarkdownTable(content)) {
-            MarkdownBlockBody(content, isStreaming = true, modifier = modifier)
-        } else {
-            val mdColors = currentMdColors()
-            Column(modifier = modifier) {
-                Text(
-                    text = content,
-                    fontSize = BaseFontSize,
-                    lineHeight = BaseLineHeight,
-                    color = mdColors.text,
-                )
-            }
-        }
+        // Keep the stable outer item, but always use the live Markdown parser.
+        // The previous plain-Text fallback exposed `##`, `**` and `|` until a
+        // complete table separator appeared. MarkdownBlockBody already has a
+        // cheap live path for ordinary prose and promotes a recognized table
+        // to the grid renderer without changing the LazyColumn item.
+        MarkdownBlockBody(content, isStreaming = true, modifier = modifier)
         return
     }
     // Keep one stable collector for the lifetime of this composable and keep
@@ -778,6 +767,17 @@ private fun streamingTableLines(content: String): List<String>? {
     if (lines.drop(end).any { it.isNotBlank() }) return null
     val complete = lines.subList(0, end).filter { it.isNotEmpty() }
     return complete.takeIf { it.size >= 2 }
+}
+
+internal fun looksLikeMarkdownTableCandidate(content: String): Boolean {
+    val normalized = normalizeMarkdownTableEscapes(content)
+    val lines = normalized.lines()
+    val separatorIndex = lines.indexOfFirst { line ->
+        val trimmed = line.trim()
+        trimmed.matches(tableSeparatorRegex) ||
+            (trimmed.startsWith("|") && trimmed.count { it == '-' } >= 3)
+    }
+    return separatorIndex > 0 && lines[separatorIndex - 1].contains('|')
 }
 
 internal fun looksLikeMarkdownTable(content: String): Boolean {
@@ -1158,8 +1158,10 @@ private fun MarkdownBlockBody(
     }
     Column(modifier = modifier) {
         if (blocks.isEmpty() && rawText.isNotBlank()) {
+            // Keep the preview Markdown-aware. Showing rawText here exposed
+            // `##`, `**` and table pipes while the async parse caught up.
             Text(
-                text = rawText.take(COLD_PARSE_PREVIEW_CHARS),
+                text = markdownStreamingPreview(rawText),
                 fontSize = BaseFontSize,
                 lineHeight = BaseLineHeight,
                 color = currentMdColors().text,
@@ -1176,7 +1178,28 @@ private fun MarkdownBlockBody(
  * preview in the meantime) instead of synchronously in composition. Below
  * it the parse is sub-ms and the placeholder swap would flicker for nothing.
  */
-private const val COLD_PARSE_PREVIEW_CHARS = 4_000
+private fun markdownStreamingPreview(text: String): String {
+    return text
+        .lineSequence()
+        .map { line ->
+            val trimmed = line.trim()
+            if (trimmed.matches(tableSeparatorRegex)) return@map ""
+            val withoutHeading = line.replace(Regex("^(\\s*)#{1,6}\\s+"), "$1")
+            val withoutPipes = if (withoutHeading.contains('|')) {
+                withoutHeading.split('|')
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                    .joinToString("    ")
+            } else {
+                withoutHeading
+            }
+            withoutPipes.replace("**", "")
+        }
+        .joinToString("\n")
+        .trim()
+        .take(COLD_PARSE_PREVIEW_CHARS)
+}
+
 
 /**
  * [T-android-live-block-degrade] A LIVE fragment larger than this renders as a

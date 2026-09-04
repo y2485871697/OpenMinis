@@ -534,6 +534,20 @@ private fun toolBlocksForFloatingBar(
     return result
 }
 
+private fun commonPrefixCodePointLength(a: String, b: String): Int {
+    val max = minOf(a.length, b.length)
+    var index = 0
+    while (index < max) {
+        val aCodePoint = a.codePointAt(index)
+        val bCodePoint = b.codePointAt(index)
+        if (Character.charCount(aCodePoint) != Character.charCount(bCodePoint) ||
+            aCodePoint != bCodePoint
+        ) break
+        index += Character.charCount(aCodePoint)
+    }
+    return index
+}
+
 @OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
 private fun liveStreamingDelta(
@@ -587,25 +601,38 @@ private fun liveStreamingDelta(
                 isAwaitingModelResponse = it.isAwaitingModelResponse,
             )
         }
-    val currentTarget = canonicalTarget ?: target ?: lastGoodTarget ?: fallbackTarget ?: return null
+    val liveTarget = target ?: lastGoodTarget ?: fallbackTarget
+    val currentTarget = if (presentationActive) {
+        liveTarget ?: canonicalTarget ?: return null
+    } else {
+        // At stream end the canonical message contains the complete snapshot,
+        // but it is still a pending display target. Do not return it directly:
+        // the old precedence bypassed the presenter and made the whole reply
+        // appear in one frame exactly when finish_reason=stop arrived.
+        canonicalTarget ?: liveTarget ?: return null
+    }
     if (animateTextBlockId == null) return currentTarget
 
-    if (animateTextBlockId == null) return currentTarget
-
-    // Only a live side-channel should start the presentation clock. Once the
-    // stream is gone, this is a completed historical row; returning the
-    // canonical snapshot directly prevents a recycled LazyColumn item from
-    // replaying the reply when it comes back on screen.
-    val shouldAnimate = target != null && presentationActive
+    // Keep the presenter alive for the stream-end drain as well as live ticks.
+    // The canonical final snapshot must pass through the same displayed-prefix
+    // gate before the row is allowed to freeze.
+    val shouldAnimate = presentationActive ||
+        (animateTextBlockId != null && (target != null || lastGoodTarget != null || fallbackTarget != null))
     if (!shouldAnimate) return currentTarget
 
-    val targetBlockText = currentTarget.toolBlocks
-        .firstOrNull { it.id == animateTextBlockId && it.kind == "text" }
-        ?.content
-        ?: currentTarget.content
+    val targetBlockText = normalizeMarkdownTableEscapes(
+        currentTarget.toolBlocks
+            .firstOrNull { it.id == animateTextBlockId && it.kind == "text" }
+            ?.content
+            ?: currentTarget.content,
+    )
     val progressKey = "$messageId:${animateTextBlockId ?: "message"}"
     var displayedText by remember(messageId, animateTextBlockId) {
-        mutableStateOf(viewModel.streamingDisplayProgress(progressKey))
+        mutableStateOf(
+            normalizeMarkdownTableEscapes(
+                viewModel.streamingDisplayProgress(progressKey),
+            ),
+        )
     }
     val isTableStream = remember(messageId, animateTextBlockId) {
         mutableStateOf(false)
@@ -617,7 +644,7 @@ private fun liveStreamingDelta(
             // shape, so the generic backlog accelerator consumed a complete
             // row in one frame. Use the same adjacent header/separator test as
             // MarkdownBlockBody and scan the whole live fragment.
-            isTableStream.value = looksLikeMarkdownTable(targetBlockText)
+            isTableStream.value = looksLikeMarkdownTableCandidate(targetBlockText)
         }
     }
     // Keep the presentation loop alive while transport snapshots change. A
@@ -663,9 +690,14 @@ private fun liveStreamingDelta(
             }
             val targetText = latestTargetText.value
             if (!targetText.startsWith(displayedText)) {
-                // A retry/replacement is a new prefix; never expose a stale
-                // fragment, but also do not replay it character by character.
-                displayedText = targetText
+                // A canonical stream-end snapshot can differ only in newline
+                // encoding or can arrive while the sampled prefix is one
+                // snapshot behind. Never jump to targetText here: that is the
+                // "all remaining content appears at once" bug. Rewind only to
+                // the safe common Unicode-code-point prefix, then resume the
+                // normal presenter cadence.
+                val commonLength = commonPrefixCodePointLength(displayedText, targetText)
+                displayedText = targetText.substring(0, commonLength)
                 viewModel.saveStreamingDisplayProgress(progressKey, displayedText)
                 elapsedNs = 0L
             } else if (elapsedNs >= frameIntervalNs && displayedText.length < targetText.length) {
@@ -712,7 +744,11 @@ private fun liveStreamingDelta(
     val renderedText = if (targetBlockText.startsWith(displayedText)) {
         displayedText
     } else {
-        targetBlockText
+        // A provider/canonical handoff may normalize one newline or escape
+        // differently. Never use the full target as a visual fallback: that
+        // bypasses the presenter at exactly stream end and causes the whole
+        // remaining reply to pop in one frame.
+        targetBlockText.substring(0, commonPrefixCodePointLength(displayedText, targetBlockText))
     }
     val displayedBlocks = currentTarget.toolBlocks.map { block ->
         if (block.id == animateTextBlockId && block.kind == "text") {
@@ -4408,7 +4444,7 @@ fun ChatScreen(
                                 ) {
                                     LargeContentGuard(
                                         content = liveBlock.content,
-                                        isStreaming = item.isStreaming,
+                                        isStreaming = item.isStreaming || (shouldPresent && liveBlock.content.length > 0),
                                         stableKey = "text:${item.messageId}:${item.block.id}",
                                     ) {
                                         SideEffect {
@@ -4416,7 +4452,7 @@ fun ChatScreen(
                                         }
                                         StreamingMarkdownText(
                                             content = liveBlock.content,
-                                            isStreaming = item.isStreaming,
+                                            isStreaming = shouldPresent,
                                             shardId = TextShardId(
                                                 messageId = item.messageId,
                                                 shardId = "text:${item.block.id}",
