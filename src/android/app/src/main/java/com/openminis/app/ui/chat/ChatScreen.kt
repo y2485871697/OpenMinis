@@ -4414,7 +4414,13 @@ fun ChatScreen(
                                         // compatible prefix below.
                                         fallbackTarget = StreamingDelta(
                                             content = item.messageMarkdown,
-                                            toolBlocks = listOf(item.block),
+                                            toolBlocks = listOf(
+                                                AssistantBlock(
+                                                    id = item.parentBlockId,
+                                                    kind = "text",
+                                                    content = item.rawText,
+                                                ),
+                                            ),
                                             isAwaitingModelResponse = false,
                                         ),
                                         presentationActive = item.isStreaming,
