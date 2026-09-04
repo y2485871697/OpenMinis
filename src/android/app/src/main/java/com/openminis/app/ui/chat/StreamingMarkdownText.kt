@@ -1178,6 +1178,8 @@ private fun MarkdownBlockBody(
  * preview in the meantime) instead of synchronously in composition. Below
  * it the parse is sub-ms and the placeholder swap would flicker for nothing.
  */
+private const val COLD_PARSE_PREVIEW_CHARS = 4_000
+
 private fun markdownStreamingPreview(text: String): String {
     return text
         .lineSequence()
