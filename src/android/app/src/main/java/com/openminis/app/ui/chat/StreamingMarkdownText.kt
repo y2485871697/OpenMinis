@@ -61,7 +61,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
@@ -2905,7 +2905,7 @@ internal object TableHScrollStates {
 }
 
 @Composable
-private fun RenderTable(block: MdBlock.Table) {
+private fun RenderTable(block: MdBlock.Table, isStreaming: Boolean = false) {
     val colors = currentMdColors()
     val colCount = maxOf(block.headers.size, block.rows.maxOfOrNull { it.size } ?: 0)
     if (colCount == 0) return
