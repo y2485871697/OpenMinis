@@ -70,6 +70,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -657,8 +658,51 @@ class ChatViewModel(
     private val _streamingById = MutableStateFlow<Map<String, StreamingDelta>>(emptyMap())
     val streamingById: StateFlow<Map<String, StreamingDelta>> = _streamingById.asStateFlow()
 
+    // RikkaHub separates provider events from UI publication. Keep only the
+    // newest immutable snapshot per assistant and publish it on a 50ms UI
+    // boundary; this prevents a fast SSE connection from enqueueing hundreds
+    // of Compose invalidations while preserving the latest text.
+    private val streamingPublishScope = kotlinx.coroutines.CoroutineScope(
+        SupervisorJob() + Dispatchers.Main.immediate,
+    )
+    private val streamingPublishLock = Any()
+    private val pendingStreamingSnapshots = mutableMapOf<String, StreamingDelta>()
+    private val streamingPublishJobs = mutableMapOf<String, Job>()
+
+    private fun enqueueStreamingSnapshot(id: String, snapshot: StreamingDelta) {
+        synchronized(streamingPublishLock) {
+            pendingStreamingSnapshots[id] = snapshot
+            if (streamingPublishJobs[id]?.isActive == true) return
+            streamingPublishJobs[id] = streamingPublishScope.launch {
+                kotlinx.coroutines.delay(50L)
+                val latest = synchronized(streamingPublishLock) {
+                    pendingStreamingSnapshots.remove(id).also {
+                        streamingPublishJobs.remove(id)
+                    }
+                } ?: return@launch
+                _streamingById.update { current -> current + (id to latest) }
+            }
+        }
+    }
+
+    private fun flushPendingStreamingSnapshot(id: String) {
+        val latest = synchronized(streamingPublishLock) {
+            streamingPublishJobs.remove(id)?.cancel()
+            pendingStreamingSnapshots.remove(id)
+        } ?: return
+        _streamingById.update { current -> current + (id to latest) }
+    }
+
+    private fun clearPendingStreamingSnapshot(id: String) {
+        synchronized(streamingPublishLock) {
+            streamingPublishJobs.remove(id)?.cancel()
+            pendingStreamingSnapshots.remove(id)
+        }
+    }
+
     /** Drop a message's live snapshot on termination. */
     private fun clearStreamFlushState(id: String) {
+        clearPendingStreamingSnapshot(id)
         _streamingById.value = _streamingById.value - id
     }
 
@@ -10000,7 +10044,7 @@ class ChatViewModel(
                 isAwaitingModelResponse = isAwaitingModelResponse,
                 contentStructureKey = streamingContentStructureKey(content),
             )
-            _streamingById.update { current -> current + (id to snapshot) }
+            enqueueStreamingSnapshot(id, snapshot)
             // [T-android-timeout-while-running] If a transient banner
             // (`message.error`) is still on the canonical assistant message
             // when a fresh streaming event arrives, the banner is stale —
@@ -10071,6 +10115,7 @@ class ChatViewModel(
      * [updateAssistantMessage] call had isStreaming=true.
      */
     private fun flushStreamingDelta(id: String) {
+        flushPendingStreamingSnapshot(id)
         val delta = _streamingById.value[id]
         if (delta == null) return
         val current = _messages.value
