@@ -124,6 +124,7 @@ import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
@@ -573,7 +574,10 @@ private fun StreamingMarkdownTextBody(
     LaunchedEffect(mdColors) {
         snapshotFlow { latestContent }
             .distinctUntilChanged()
-            .conflate()
+            // RikkaHub's UI observes a bounded cadence. Conflation placed
+            // before the expensive Markdown parse could leave a fast-model
+            // table waiting behind one long parse and only repaint at finish.
+            .sample(50L)
             .map { snapshot -> parseStreamingMarkdownBlocks(snapshot, mdColors) }
             .flowOn(Dispatchers.Default)
             .catch { error ->
@@ -987,7 +991,7 @@ private fun MarkdownBlockBody(
     LaunchedEffect(mdColors) {
         snapshotFlow { latestText }
             .distinctUntilChanged()
-            .conflate()
+            .sample(50L)
             .map { snapshot -> parseStreamingMarkdownBlocks(snapshot, mdColors) }
             .flowOn(Dispatchers.Default)
             .catch { error ->
@@ -2835,6 +2839,18 @@ private fun RenderTable(block: MdBlock.Table) {
                 copyTableImage = {
                     tableScope.launch {
                         try {
+                            // [T-android-table-layer-cap] Oversized tables skip
+                            // layer recording (see the drawWithContent below), so
+                            // the captured bitmap would be blank — degrade to
+                            // copying the markdown text instead of producing a
+                            // broken image.
+                            if (tableLayerOversized) {
+                                val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                                    as android.content.ClipboardManager
+                                cm.setPrimaryClip(android.content.ClipData.newPlainText("table", block.raw))
+                                Toast.makeText(context, tableCopiedToast, Toast.LENGTH_SHORT).show()
+                                return@launch
+                            }
                             val imageBitmap = tableGraphicsLayer.toImageBitmap()
                             val androidBitmap = imageBitmap.asAndroidBitmap()
                             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
