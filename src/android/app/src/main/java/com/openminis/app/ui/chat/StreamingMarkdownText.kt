@@ -559,14 +559,22 @@ private fun StreamingMarkdownTextBody(
     // ends, [isStreaming] flips false and the frozen item is re-rendered as
     // full Markdown (via the cache or off-main parse below).
     if (isStreaming) {
-        val mdColors = currentMdColors()
-        Column(modifier = modifier) {
-            Text(
-                text = content,
-                fontSize = BaseFontSize,
-                lineHeight = BaseLineHeight,
-                color = mdColors.text,
-            )
+        // Keep the one stable message item, but switch its interior to the
+        // incremental table renderer as soon as a real header/separator pair
+        // exists. The previous unconditional plain Text path meant the new
+        // stable-item lifecycle could never show a live table at all.
+        if (looksLikeMarkdownTable(content)) {
+            MarkdownBlockBody(content, isStreaming = true, modifier = modifier)
+        } else {
+            val mdColors = currentMdColors()
+            Column(modifier = modifier) {
+                Text(
+                    text = content,
+                    fontSize = BaseFontSize,
+                    lineHeight = BaseLineHeight,
+                    color = mdColors.text,
+                )
+            }
         }
         return
     }

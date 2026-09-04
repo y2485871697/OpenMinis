@@ -719,7 +719,26 @@ internal fun buildFlatChatItems(
                         // set stable across the streaming→idle boundary and avoid
                         // the stream-end reflow flicker described above.
                         val isLiveTail = isLastText && isLastAssistantTurn
-                        val fragments = if (isLiveTail) rawFragments else coalesceMarkdownFragments(rawFragments)
+                        // Match RikkaHub's stable UIMessagePart.Text lifetime:
+                        // keep the latest assistant text block as ONE keyed
+                        // LazyColumn item throughout streaming and after the
+                        // transport ends. Splitting the provider snapshot at
+                        // blank lines made its last blockIndex race ahead of
+                        // the presenter prefix; the selected live fragment was
+                        // then empty (0x0 in logs) until a whole table row had
+                        // arrived, which visually defeated character streaming.
+                        // StreamingMarkdownText already incrementally parses
+                        // tables/lists inside this stable item.
+                        if (isLiveTail) {
+                            out.add(dedupe(FlatChatItem.AssistantText(
+                                messageId = message.id,
+                                block = block,
+                                isStreaming = message.isStreaming && isLastText,
+                                messageMarkdown = joinedMarkdown,
+                            )))
+                            continue@forEachIndexed
+                        }
+                        val fragments = coalesceMarkdownFragments(rawFragments)
                         if (fragments.isEmpty()) {
                             // Defensive: if the splitter returns nothing for
                             // a non-empty input (shouldn't happen), fall back
