@@ -657,6 +657,24 @@ class ChatViewModel(
     private val _streamingById = MutableStateFlow<Map<String, StreamingDelta>>(emptyMap())
     val streamingById: StateFlow<Map<String, StreamingDelta>> = _streamingById.asStateFlow()
 
+    // Frame-paced text already shown by the renderer. This belongs to the
+    // ViewModel, not to a LazyColumn item: recycled rows recreate their
+    // composables when the user scrolls away and back.
+    private val _streamingDisplayProgress = mutableMapOf<String, String>()
+
+    internal fun streamingDisplayProgress(key: String): String =
+        _streamingDisplayProgress[key].orEmpty()
+
+    internal fun saveStreamingDisplayProgress(key: String, value: String) {
+        if (value.isEmpty()) _streamingDisplayProgress.remove(key)
+        else _streamingDisplayProgress[key] = value
+    }
+
+    internal fun clearStreamingDisplayProgress(messageId: String) {
+        val prefix = "$messageId:"
+        _streamingDisplayProgress.keys.removeAll { it.startsWith(prefix) }
+    }
+
     /** Drop a message's live snapshot on termination. */
     private fun clearStreamFlushState(id: String) {
         _streamingById.value = _streamingById.value - id

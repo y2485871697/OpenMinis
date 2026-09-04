@@ -590,12 +590,22 @@ private fun liveStreamingDelta(
     val currentTarget = canonicalTarget ?: target ?: lastGoodTarget ?: fallbackTarget ?: return null
     if (animateTextBlockId == null) return currentTarget
 
+    if (animateTextBlockId == null) return currentTarget
+
+    // Only a live side-channel should start the presentation clock. Once the
+    // stream is gone, this is a completed historical row; returning the
+    // canonical snapshot directly prevents a recycled LazyColumn item from
+    // replaying the reply when it comes back on screen.
+    val shouldAnimate = target != null && presentationActive
+    if (!shouldAnimate) return currentTarget
+
     val targetBlockText = currentTarget.toolBlocks
         .firstOrNull { it.id == animateTextBlockId && it.kind == "text" }
         ?.content
         ?: currentTarget.content
+    val progressKey = "$messageId:${animateTextBlockId ?: "message"}"
     var displayedText by remember(messageId, animateTextBlockId) {
-        mutableStateOf("")
+        mutableStateOf(viewModel.streamingDisplayProgress(progressKey))
     }
     val isTableStream = remember(messageId, animateTextBlockId) {
         mutableStateOf(false)
@@ -652,6 +662,7 @@ private fun liveStreamingDelta(
                 // A retry/replacement is a new prefix; never expose a stale
                 // fragment, but also do not replay it character by character.
                 displayedText = targetText
+                viewModel.saveStreamingDisplayProgress(progressKey, displayedText)
                 elapsedNs = 0L
             } else if (elapsedNs >= frameIntervalNs && displayedText.length < targetText.length) {
                 elapsedNs -= frameIntervalNs
@@ -681,6 +692,7 @@ private fun liveStreamingDelta(
                     continue
                 }
                 displayedText = targetText.substring(0, next)
+                viewModel.saveStreamingDisplayProgress(progressKey, displayedText)
             } else if (elapsedNs >= frameIntervalNs) {
                 // No pending text: discard accumulated time so the first new
                 // chunk starts on the normal cadence instead of jumping.
