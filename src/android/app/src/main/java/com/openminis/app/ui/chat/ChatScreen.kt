@@ -656,41 +656,29 @@ private fun liveStreamingDelta(
             } else if (elapsedNs >= frameIntervalNs && displayedText.length < targetText.length) {
                 elapsedNs -= frameIntervalNs
                 var next = displayedText.length
-                if (isTableStream.value) {
-                    // Tables must advance at row boundaries, not at an
-                    // arbitrary character count. A network burst can contain
-                    // several complete rows; expose only the next newline-
-                    // terminated row per display tick. The final unterminated
-                    // row is released when the transport has ended.
-                    val nextNewline = targetText.indexOf('\n', displayedText.length)
-                    next = when {
-                        nextNewline >= 0 -> nextNewline + 1
-                        !presentationActive && !hasLiveTarget.value -> targetText.length
-                        else -> displayedText.length
-                    }
-                    if (next == displayedText.length) {
-                        elapsedNs = 0L
-                        continue
-                    }
+                val limit = if (isTableStream.value) {
+                    // Keep the burst inside the current row, but release the
+                    // row itself character by character. The previous code
+                    // jumped directly to newline + 1, which made every row
+                    // appear atomically.
+                    val newline = targetText.indexOf('\n', displayedText.length)
+                    if (newline >= 0) newline + 1 else targetText.length
+                } else {
+                    targetText.length
                 }
-                // [T-rikkahub-burst-smooth] Backlog-scaled release rate. The
-                // fixed 2-cp/frame cadence (~62 cps) was tuned for smooth
-                // trickle streams, but this network/provider delivers output
-                // in multi-second silences followed by 1300-1700-char bursts
-                // (measured in minis-2026-09-04: gap 3.2s → 172 deltas / 1335
-                // chars in 2s at 10:00:46). At 62 cps a 1600-char burst needs
-                // ~27s to paint; the display falls far behind transport, and
-                // any row state reset (LazyColumn recycle, turn-end rebuild)
-                // then exposes the full text at once — the reported "卡住然
-                // 后突然全部输出". Keep the 2-cp floor for smooth small deltas
-                // and scale with backlog so bursts paint in seconds. Capped so
-                // a replacement-level jump still takes a couple of frames.
-                val backlog = targetText.length - displayedText.length
-                val release = (codePointsPerFrame + backlog / 6).coerceAtMost(64)
+                val backlog = limit - displayedText.length
+                val release = if (isTableStream.value) {
+                    (codePointsPerFrame + backlog / 6).coerceAtMost(24)
+                } else {
+                    (codePointsPerFrame + (targetText.length - displayedText.length) / 6)
+                        .coerceAtMost(64)
+                }
                 repeat(release) {
-                    if (next < targetText.length) {
-                        next = targetText.offsetByCodePoints(next, 1)
-                    }
+                    if (next < limit) next = targetText.offsetByCodePoints(next, 1)
+                }
+                if (next == displayedText.length) {
+                    elapsedNs = 0L
+                    continue
                 }
                 displayedText = targetText.substring(0, next)
             } else if (elapsedNs >= frameIntervalNs) {
