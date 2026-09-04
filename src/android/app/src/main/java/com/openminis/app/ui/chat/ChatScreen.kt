@@ -560,7 +560,34 @@ private fun liveStreamingDelta(
             .sample(16L)
     }
     val target by flow.collectAsState(initial = null)
-    val currentTarget = target ?: fallbackTarget ?: return null
+    // Keep the last received snapshot alive across the streaming→idle edge.
+    // `sample(16L)` and the async flat-item rebuild do not complete in the
+    // same frame: streamingById can become null while flatItems still holds
+    // the previous prefix. Falling straight back to item.rawText at that
+    // point makes the already-rendered tail disappear. This handoff buffer
+    // is per message/block composition and is released naturally when the
+    // row is replaced or disposed.
+    var lastGoodTarget by remember(messageId, animateTextBlockId) {
+        mutableStateOf<StreamingDelta?>(null)
+    }
+    SideEffect {
+        if (target != null) lastGoodTarget = target
+    }
+    // At the stream-end edge the canonical message is finalized before the
+    // async flat-item list catches up. Prefer that final canonical snapshot
+    // over an older sampled value, but only after its isStreaming flag drops;
+    // during the live turn the side-channel remains authoritative.
+    val canonicalTarget = viewModel.messages.value
+        .firstOrNull { it.id == messageId }
+        ?.takeUnless { it.isStreaming }
+        ?.let {
+            StreamingDelta(
+                content = it.content,
+                toolBlocks = it.toolBlocks,
+                isAwaitingModelResponse = it.isAwaitingModelResponse,
+            )
+        }
+    val currentTarget = canonicalTarget ?: target ?: lastGoodTarget ?: fallbackTarget ?: return null
     if (animateTextBlockId == null) return currentTarget
 
     val targetBlockText = currentTarget.toolBlocks
@@ -4379,6 +4406,18 @@ fun ChatScreen(
                                         viewModel,
                                         item.messageId,
                                         animateTextBlockId = item.parentBlockId,
+                                        // During the handoff, the immutable row
+                                        // snapshot may already contain more
+                                        // text than the sampled side-channel.
+                                        // Keep it as a second last-good source;
+                                        // the live helper selects the longer
+                                        // compatible prefix below.
+                                        fallbackTarget = StreamingDelta(
+                                            content = item.messageMarkdown,
+                                            toolBlocks = listOf(item.block),
+                                            isAwaitingModelResponse = false,
+                                        ),
+                                        presentationActive = item.isStreaming,
                                     )
                                 } else {
                                     null
