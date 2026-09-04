@@ -551,13 +551,12 @@ private fun liveStreamingDelta(
     presentationActive: Boolean = true,
 ): StreamingDelta? {
     val flow = remember(viewModel, messageId) {
-        // Publish at most once per display frame. Provider SSE chunks can be
-        // much faster than Compose can measure/render; forwarding every one
-        // creates uneven catch-up bursts after a busy frame. RikkaHub's live
-        // renderer has the same frame-paced boundary.
+        // The ViewModel already publishes snapshots on a fixed background
+        // cadence. Do not sample this StateFlow again here: a second clock
+        // can hold the final snapshot until the next scroll/layout pass,
+        // which makes a completed reply appear stuck until the user swipes.
         viewModel.streamingById
             .map { it[messageId] }
-            .sample(16L)
     }
     val target by flow.collectAsState(initial = null)
     val currentTarget = target ?: fallbackTarget ?: return null
