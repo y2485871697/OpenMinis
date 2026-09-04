@@ -933,18 +933,21 @@ private fun MarkdownBlockBody(
         }
         return
     }
-    // [T-android-live-block-degrade] During streaming the live tail changes
-    // on every SSE delta. Parsing and laying out full Markdown tables on each
-    // tick is the main source of the 10–55 s `lazyColumn.firstItem.compose`
-    // hangs observed in minis-2026-09-04*.log. Render the live fragment as
-    // plain text while the stream is active; the frozen branch above will
-    // re-render it as proper Markdown once the turn ends. (The previous
-    // 8 KB threshold only helped truly giant single blocks; tables only a few
-    // hundred chars long are already expensive enough to stall the UI.)
-    if (isStreaming) {
+    // [T-android-live-block-degrade] B-lite: a LIVE fragment that has grown
+    // huge is almost always an unsplittable single block (the splitter keeps
+    // tables/fences whole — exactly the MiniMax giant-table ANR load). Parsing
+    // it in full on every publish is O(fragment) with no upper bound, so over
+    // the threshold render a bounded plain-text tail instead and do the full
+    // parse ONCE when the fragment freezes (isStreaming flips false above).
+    if (rawText.length > LIVE_FRAGMENT_DEGRADE_CHARS) {
         Column(modifier = modifier) {
             Text(
-                text = rawText,
+                text = stringResource(R.string.chat_stream_degraded_notice),
+                style = MaterialTheme.typography.labelSmall,
+                color = currentMdColors().blockquote,
+            )
+            Text(
+                text = "…" + rawText.takeLast(LIVE_FRAGMENT_TAIL_CHARS),
                 fontSize = BaseFontSize,
                 lineHeight = BaseLineHeight,
                 color = currentMdColors().text,
@@ -998,6 +1001,15 @@ private fun MarkdownBlockBody(
  * it the parse is sub-ms and the placeholder swap would flicker for nothing.
  */
 private const val COLD_PARSE_PREVIEW_CHARS = 4_000
+
+/**
+ * [T-android-live-block-degrade] A LIVE fragment larger than this renders as a
+ * bounded plain-text tail until it freezes. 8KB of markdown in one unsplit
+ * block is far beyond normal prose paragraphs — only giant tables/fences get
+ * here, and those were the per-tick full-re-parse ANR load.
+ */
+private const val LIVE_FRAGMENT_DEGRADE_CHARS = 8_000
+private const val LIVE_FRAGMENT_TAIL_CHARS = 3_000
 
 /**
  * [T-android-coldload-offmain-parse] Composition-snapshot prewarmer for the
