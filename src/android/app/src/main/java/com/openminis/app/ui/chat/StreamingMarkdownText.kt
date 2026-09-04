@@ -778,7 +778,6 @@ private fun looksLikeMarkdownTable(content: String): Boolean =
  * provider to finish the whole table. This is deliberately separate from
  * [splitMarkdownIntoBlockTexts]: blank-line splitting is correct for prose,
  * but a Markdown table uses contiguous `|` lines as its row boundaries.
- */
  * [T-android-defensive-fragment-merge] A fenced code block fragment is one
  * whose first non-blank line opens a ``` fence. Such fragments must stay
  * standalone (own LazyColumn row) for correct code rendering + horizontal
