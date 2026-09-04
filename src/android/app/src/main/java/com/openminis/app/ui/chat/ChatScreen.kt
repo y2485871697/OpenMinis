@@ -578,11 +578,15 @@ private fun liveStreamingDelta(
     val hasLiveTarget = rememberUpdatedState(target != null)
 
     // Provider reads can contain a whole paragraph after a network pause. The
-    // received snapshot is the buffer; this fixed frame-paced loop is the
-    // presentation clock. It deliberately releases a constant two Unicode
-    // code points every ~32ms instead of speeding up for larger backlogs, so
-    // a slow/fast network cannot turn into visible bursts or variable typing
-    // speed. A long UI frame is capped to one release, never a catch-up burst.
+    // received snapshot is the buffer; this frame-paced loop is the
+    // presentation clock. It releases a FLOOR of two Unicode code points per
+    // ~32ms tick and scales UP with the backlog (see
+    // [T-rikkahub-burst-smooth] at the release site): a slow network cannot
+    // turn into visible bursts, and a burst (2s silence → 1600+ chars on this
+    // provider, measured) still paints within seconds instead of leaving the
+    // display 27s behind transport where any row recycle would dump the
+    // remainder at once. A long UI frame is capped to one release, never a
+    // catch-up burst.
     LaunchedEffect(messageId, animateTextBlockId, presentationActive) {
         val frameIntervalNs = 32_000_000L
         val codePointsPerFrame = 2
@@ -616,7 +620,21 @@ private fun liveStreamingDelta(
             } else if (elapsedNs >= frameIntervalNs && displayedText.length < targetText.length) {
                 elapsedNs -= frameIntervalNs
                 var next = displayedText.length
-                repeat(codePointsPerFrame) {
+                // [T-rikkahub-burst-smooth] Backlog-scaled release rate. The
+                // fixed 2-cp/frame cadence (~62 cps) was tuned for smooth
+                // trickle streams, but this network/provider delivers output
+                // in multi-second silences followed by 1300-1700-char bursts
+                // (measured in minis-2026-09-04: gap 3.2s → 172 deltas / 1335
+                // chars in 2s at 10:00:46). At 62 cps a 1600-char burst needs
+                // ~27s to paint; the display falls far behind transport, and
+                // any row state reset (LazyColumn recycle, turn-end rebuild)
+                // then exposes the full text at once — the reported "卡住然
+                // 后突然全部输出". Keep the 2-cp floor for smooth small deltas
+                // and scale with backlog so bursts paint in seconds. Capped so
+                // a replacement-level jump still takes a couple of frames.
+                val backlog = targetText.length - displayedText.length
+                val release = (codePointsPerFrame + backlog / 6).coerceAtMost(64)
+                repeat(release) {
                     if (next < targetText.length) {
                         next = targetText.offsetByCodePoints(next, 1)
                     }
