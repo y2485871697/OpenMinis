@@ -539,20 +539,27 @@ private fun toolBlocksForFloatingBar(
  * for one message, published at most once per display frame. RikkaHub parity:
  * the received snapshot is rendered AT ARRIVAL SPEED — there is no typewriter.
  *
- * The typewriter (fixed 2 cp/frame, later an adaptive backlog drain) was
- * removed after the 2026-09-05 captures: against a gateway that delivers a
- * whole table reply in a few seconds, ANY pacing layer either trails the
- * transport (felt as "stuck, then everything at once") or drains so fast the
- * pacing is invisible while still adding backlog mechanics (prefix-jump
- * fallback, drain bursts, 0-height empties). Rendering the latest snapshot
- * directly matches RikkaHub's renderer and keeps the perceived speed equal
- * to the provider's actual send speed.
+ * [T-android-stream-burst-smoothing] When [smoothTextBlockId] is set, that
+ * text block is presented through a bounded adaptive smoother: the displayed
+ * prefix chases the received snapshot at `backlog / SMOOTH_WINDOW_FRAMES`
+ * code points per frame. RikkaHub has no such layer — its perceived
+ * steadiness comes from the model emitting slowly. Our repeat-retry scenario
+ * hits the gateway's KV cache, which replays the whole reply in seconds (313
+ * chunks/s measured); raw arrival rendering then reads as an instant dump.
+ * The smoother shapes only bursts: a steady provider is rendered
+ * near-unthrottled (3 cp/frame floor), and the worst-case presentation lag
+ * is bounded to SMOOTH_WINDOW_FRAMES/60 ≈ 4 s — the old fixed-rate
+ * typewriter's failure mode (30 s+ tail, stuck-then-dump) is structurally
+ * impossible because the release rate always scales with the backlog.
  */
 @OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
 private fun liveStreamingDelta(
     viewModel: ChatViewModel,
     messageId: String,
+    smoothTextBlockId: String? = null,
+    fallbackTarget: StreamingDelta? = null,
+    presentationActive: Boolean = true,
 ): StreamingDelta? {
     val flow = remember(viewModel, messageId) {
         // Publish at most once per display frame. Provider SSE chunks can be
@@ -564,8 +571,92 @@ private fun liveStreamingDelta(
             .sample(16L)
     }
     val target by flow.collectAsState(initial = null)
-    return target
+    val currentTarget = target ?: fallbackTarget ?: return null
+    if (smoothTextBlockId == null) return currentTarget
+
+    val targetBlockText = currentTarget.toolBlocks
+        .firstOrNull { it.id == smoothTextBlockId && it.kind == "text" }
+        ?.content
+        ?: currentTarget.content
+    var displayedText by remember(messageId, smoothTextBlockId) {
+        mutableStateOf("")
+    }
+    // The loop reads the newest target through rememberUpdatedState so that
+    // target changes never cancel/restart the pacing loop.
+    val latestTargetText = rememberUpdatedState(targetBlockText)
+    val hasLiveTarget = rememberUpdatedState(target != null)
+
+    LaunchedEffect(messageId, smoothTextBlockId, presentationActive) {
+        val frameIntervalNs = 32_000_000L
+        var previousFrameNs = 0L
+        var elapsedNs = 0L
+        while (true) {
+            // After the transport drains, keep smoothing until the displayed
+            // prefix catches up with the canonical content — the lag is
+            // bounded by the smoothing window (~4 s), never the old fixed
+            // typewriter's 30 s+ tail.
+            val terminalTarget = latestTargetText.value
+            if (!presentationActive &&
+                !hasLiveTarget.value &&
+                terminalTarget.startsWith(displayedText) &&
+                displayedText.length >= terminalTarget.length
+            ) {
+                break
+            }
+            withFrameNanos { nowNs ->
+                if (previousFrameNs != 0L) {
+                    elapsedNs = (elapsedNs + (nowNs - previousFrameNs))
+                        .coerceAtMost(frameIntervalNs * 2)
+                }
+                previousFrameNs = nowNs
+            }
+            val targetText = latestTargetText.value
+            if (!targetText.startsWith(displayedText)) {
+                // A retry/replacement is a new prefix; never expose a stale
+                // fragment. The snap is bounded by the smoothing window — at
+                // most ~4 s of content, vs the old fixed-rate typewriter's
+                // whole-reply snaps.
+                displayedText = targetText
+                elapsedNs = 0L
+            } else if (elapsedNs >= frameIntervalNs && displayedText.length < targetText.length) {
+                elapsedNs -= frameIntervalNs
+                val backlog = targetText.length - displayedText.length
+                val release = (backlog / SMOOTH_WINDOW_FRAMES).coerceIn(3, 24)
+                var next = displayedText.length
+                repeat(release) {
+                    if (next < targetText.length) {
+                        next = targetText.offsetByCodePoints(next, 1)
+                    }
+                }
+                displayedText = targetText.substring(0, next)
+            } else if (elapsedNs >= frameIntervalNs) {
+                // Caught up: discard accumulated time so the next chunk
+                // starts on the normal cadence instead of jumping.
+                elapsedNs = 0L
+            }
+        }
+    }
+
+    val renderedText = if (targetBlockText.startsWith(displayedText)) {
+        displayedText
+    } else {
+        targetBlockText
+    }
+    val displayedBlocks = currentTarget.toolBlocks.map { block ->
+        if (block.id == smoothTextBlockId && block.kind == "text") {
+            block.copy(content = renderedText)
+        } else {
+            block
+        }
+    }
+    return currentTarget.copy(toolBlocks = displayedBlocks)
 }
+
+/**
+ * [T-android-stream-burst-smoothing] Drain the burst backlog over ~4 s at
+ * 60 fps: a 2200-char burst replays at ~540 cps, a 200-char one at ~180 cps.
+ */
+private const val SMOOTH_WINDOW_FRAMES = 240
 
 @OptIn(ExperimentalMaterial3Api::class, kotlinx.coroutines.FlowPreview::class)
 @Composable
@@ -4212,16 +4303,38 @@ fun ChatScreen(
                             } // close UserBubble SideEffect + UserMessageBubble block
                             is FlatChatItem.AssistantHeader -> AssistantHeader()
                             is FlatChatItem.AssistantText -> {
-                                // [T-android-stream-arrival-pace] rikkahub
-                                // parity: the live row renders the latest
-                                // received snapshot at arrival speed (no
-                                // typewriter, no post-stream catch-up). After
-                                // the transport drains, the side-channel is
-                                // cleared and liveDelta becomes null — the
-                                // row falls back to item.block, which by then
-                                // IS the canonical final content.
-                                val liveDelta = if (item.isStreaming) {
-                                    liveStreamingDelta(viewModel, item.messageId)
+                                // [T-android-stream-burst-smoothing] The
+                                // live row presents the received text through
+                                // the bounded adaptive smoother (burst
+                                // replay from the gateway KV cache otherwise
+                                // reads as an instant dump). presentation
+                                // survives the transport drain: fallback to
+                                // the canonical snapshot keeps the smoother
+                                // draining until caught up (~4 s worst
+                                // case), then the loop breaks and liveDelta
+                                // naturally resolves to item.block.
+                                var wasStreaming by remember(item.messageId, item.block.id) {
+                                    mutableStateOf(false)
+                                }
+                                if (item.isStreaming) wasStreaming = true
+                                val shouldPresent = item.isStreaming || wasStreaming
+                                val fallbackTarget = if (shouldPresent) {
+                                    StreamingDelta(
+                                        content = item.messageMarkdown,
+                                        toolBlocks = listOf(item.block),
+                                        isAwaitingModelResponse = false,
+                                    )
+                                } else {
+                                    null
+                                }
+                                val liveDelta = if (shouldPresent) {
+                                    liveStreamingDelta(
+                                        viewModel,
+                                        item.messageId,
+                                        smoothTextBlockId = item.block.id,
+                                        fallbackTarget = fallbackTarget,
+                                        presentationActive = item.isStreaming,
+                                    )
                                 } else {
                                     null
                                 }
