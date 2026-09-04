@@ -772,7 +772,7 @@ private fun streamingTableLines(content: String): List<String>? {
     return complete.takeIf { it.size >= 2 }
 }
 
-private fun looksLikeMarkdownTable(content: String): Boolean {
+internal fun looksLikeMarkdownTable(content: String): Boolean {
     val normalized = normalizeMarkdownTableEscapes(content)
     val lines = normalized.lines()
     val separatorIndex = lines.indexOfFirst { it.trim().matches(tableSeparatorRegex) }

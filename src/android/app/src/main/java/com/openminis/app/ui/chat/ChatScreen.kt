@@ -612,8 +612,12 @@ private fun liveStreamingDelta(
     }
     SideEffect {
         if (!isTableStream.value) {
-            isTableStream.value = targetBlockText.contains("|") &&
-                targetBlockText.lineSequence().take(4).count { it.contains("|") } >= 2
+            // Tables commonly follow an intro sentence, blank line and
+            // heading. The old first-four-lines heuristic missed exactly that
+            // shape, so the generic backlog accelerator consumed a complete
+            // row in one frame. Use the same adjacent header/separator test as
+            // MarkdownBlockBody and scan the whole live fragment.
+            isTableStream.value = looksLikeMarkdownTable(targetBlockText)
         }
     }
     // Keep the presentation loop alive while transport snapshots change. A
