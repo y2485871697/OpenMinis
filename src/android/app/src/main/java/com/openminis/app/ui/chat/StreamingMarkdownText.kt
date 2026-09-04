@@ -748,6 +748,37 @@ fun splitMarkdownIntoBlockTexts(content: String): List<String> {
 }
 
 /**
+ * Return a table's currently complete source lines while it is streaming.
+ * Markdown tables are a special case: they contain no blank lines, so the
+ * normal paragraph splitter keeps the entire table in one live fragment.
+ * The table parser must not wait for a final blank line before the already
+ * received rows become visible.
+ */
+private fun streamingTableLines(content: String): List<String>? {
+    val lines = content.lines()
+    val separatorIndex = lines.indexOfFirst { it.trim().matches(tableSeparatorRegex) }
+    if (separatorIndex <= 0) return null
+    val headerIndex = separatorIndex - 1
+    if (!lines[headerIndex].contains('|')) return null
+    var end = separatorIndex + 1
+    while (end < lines.size && lines[end].contains('|')) end++
+    // This helper is used for a standalone table fragment. If prose is
+    // mixed into the same fragment, let the general Markdown path handle it.
+    if (lines.take(headerIndex).any { it.isNotBlank() }) return null
+    if (lines.drop(end).any { it.isNotBlank() }) return null
+    val complete = lines.subList(0, end).filter { it.isNotEmpty() }
+    return complete.takeIf { it.size >= 2 }
+}
+
+private fun looksLikeMarkdownTable(content: String): Boolean =
+    streamingTableLines(content) != null
+
+/**
+ * Split a streaming buffer into ordered table rows without waiting for the
+ * provider to finish the whole table. This is deliberately separate from
+ * [splitMarkdownIntoBlockTexts]: blank-line splitting is correct for prose,
+ * but a Markdown table uses contiguous `|` lines as its row boundaries.
+ */
  * [T-android-defensive-fragment-merge] A fenced code block fragment is one
  * whose first non-blank line opens a ``` fence. Such fragments must stay
  * standalone (own LazyColumn row) for correct code rendering + horizontal
@@ -863,6 +894,14 @@ private fun MarkdownBlockBody(
     isStreaming: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    // Share one parsed snapshot across both rendering modes. Keeping the
+    // snapshot in the same composition is important: when isStreaming flips
+    // false, creating a new frozen-parser state makes the row briefly render
+    // its preview before the off-main parse completes (the end-of-stream
+    // flash). The live AST is a valid visual bridge until the final AST lands.
+    var parsedSnapshot by remember {
+        mutableStateOf<Pair<String, List<MdBlock>>?>(null)
+    }
     // For frozen blocks, parse once per distinct fragment text PROCESS-WIDE
     // ([MarkdownParseCaches.blocks]) — scroll-away/return and session re-entry
     // are cache hits instead of fresh main-thread parses. remember() keeps the
@@ -929,6 +968,46 @@ private fun MarkdownBlockBody(
                 )
             } else {
                 blocks.forEach { RenderBlock(it) }
+            }
+        }
+        return
+    }
+    // Tables are intentionally rendered through the real table renderer even
+    // while live. The generic live path uses one cheap Text node to avoid
+    // reparsing large prose on every delta, but a table has no paragraph
+    // boundary: the whole table would otherwise appear as one monolithic
+    // text block. Reparse only this small, table-shaped fragment so each
+    // received row becomes a real row immediately.
+    if (looksLikeMarkdownTable(rawText)) {
+        val latestTableText by rememberUpdatedState(rawText)
+        var tableBlocks by remember {
+            mutableStateOf<List<MdBlock>>(emptyList())
+        }
+        LaunchedEffect(mdColors) {
+            snapshotFlow { latestTableText }
+                .distinctUntilChanged()
+                .conflate()
+                .map { snapshot -> parseStreamingMarkdownBlocks(snapshot, mdColors) }
+                .flowOn(Dispatchers.Default)
+                .catch { error ->
+                    if (error is kotlinx.coroutines.CancellationException) throw error
+                    com.openminis.app.logging.AppLogger.warning(
+                        "Markdown",
+                        "live table parse failed: ${error.message}",
+                    )
+                }
+                .collect { parsed -> tableBlocks = parsed }
+        }
+        Column(modifier = modifier) {
+            if (tableBlocks.isEmpty()) {
+                Text(
+                    text = rawText,
+                    fontSize = BaseFontSize,
+                    lineHeight = BaseLineHeight,
+                    color = currentMdColors().text,
+                )
+            } else {
+                tableBlocks.forEach { block -> RenderBlock(block) }
             }
         }
         return
