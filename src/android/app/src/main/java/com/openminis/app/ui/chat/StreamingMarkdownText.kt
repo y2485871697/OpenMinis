@@ -702,6 +702,7 @@ fun MarkdownDocument(
  * with "\n" reconstructs the input exactly.
  */
 fun splitMarkdownIntoBlockTexts(content: String): List<String> {
+    val content = normalizeMarkdownTableEscapes(content)
     if (content.isEmpty()) return emptyList()
     val out = mutableListOf<String>()
     val cur = StringBuilder()
@@ -772,7 +773,8 @@ private fun streamingTableLines(content: String): List<String>? {
 }
 
 private fun looksLikeMarkdownTable(content: String): Boolean {
-    val lines = content.lines()
+    val normalized = normalizeMarkdownTableEscapes(content)
+    val lines = normalized.lines()
     val separatorIndex = lines.indexOfFirst { it.trim().matches(tableSeparatorRegex) }
     // The table may be preceded by a heading or prose in the same streaming
     // fragment. The previous implementation rejected that valid shape and
@@ -788,7 +790,8 @@ private data class StreamingTableShape(
 
 /** Extract a table while preserving the rows that are complete on the wire. */
 private fun streamingTableShape(content: String, includePartialLastRow: Boolean): StreamingTableShape? {
-    val lines = content.lines()
+    val normalized = normalizeMarkdownTableEscapes(content)
+    val lines = normalized.lines()
     val separatorIndex = lines.indexOfFirst { it.trim().matches(tableSeparatorRegex) }
     if (separatorIndex <= 0 || !lines[separatorIndex - 1].contains('|')) return null
     val prefix = lines.subList(0, separatorIndex + 1)
@@ -1193,7 +1196,7 @@ internal fun rememberMarkdownPrewarmer(): (List<String>) -> Unit {
  * blocks parse once and the input is small, so this is fine.
  */
 private fun parseMarkdownBlocksBlocking(content: String): List<MdBlock> =
-    kotlinx.coroutines.runBlocking { parseMarkdownBlocks(content) }
+    kotlinx.coroutines.runBlocking { parseMarkdownBlocks(normalizeMarkdownTableEscapes(content)) }
 
 /**
  * Parse a live document by stable markdown fragments. Everything before the
@@ -1494,6 +1497,7 @@ private fun findDisplayMathClose(lines: List<String>, from: Int): Int? {
 }
 
 private suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
+    val content = normalizeMarkdownTableEscapes(content)
     val blocks = mutableListOf<MdBlock>()
     val lines = content.lines()
     var i = 0
