@@ -978,6 +978,7 @@ private fun MarkdownBlockBody(
     // text block. Reparse only this small, table-shaped fragment so each
     // received row becomes a real row immediately.
     if (looksLikeMarkdownTable(rawText)) {
+        val mdColors = currentMdColors()
         val latestTableText by rememberUpdatedState(rawText)
         var tableBlocks by remember {
             mutableStateOf<List<MdBlock>>(emptyList())
