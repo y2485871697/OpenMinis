@@ -770,8 +770,49 @@ private fun streamingTableLines(content: String): List<String>? {
     return complete.takeIf { it.size >= 2 }
 }
 
-private fun looksLikeMarkdownTable(content: String): Boolean =
-    streamingTableLines(content) != null
+private fun looksLikeMarkdownTable(content: String): Boolean {
+    val lines = content.lines()
+    val separatorIndex = lines.indexOfFirst { it.trim().matches(tableSeparatorRegex) }
+    // The table may be preceded by a heading or prose in the same streaming
+    // fragment. The previous implementation rejected that valid shape and
+    // fell back to one plain Text node, so the completed table arrived as a
+    // single block. Only the adjacent header/separator relationship matters.
+    return separatorIndex > 0 && lines[separatorIndex - 1].contains('|')
+}
+
+private data class StreamingTableShape(
+    val prefix: List<String>,
+    val rows: List<String>,
+)
+
+/** Extract a table while preserving the rows that are complete on the wire. */
+private fun streamingTableShape(content: String, includePartialLastRow: Boolean): StreamingTableShape? {
+    val lines = content.lines()
+    val separatorIndex = lines.indexOfFirst { it.trim().matches(tableSeparatorRegex) }
+    if (separatorIndex <= 0 || !lines[separatorIndex - 1].contains('|')) return null
+    val prefix = lines.subList(0, separatorIndex + 1)
+    val candidates = ArrayList<String>()
+    var index = separatorIndex + 1
+    while (index < lines.size) {
+        val line = lines[index]
+        if (line.isBlank() || !line.contains('|')) break
+        candidates += line
+        index++
+    }
+    val rows = if (includePartialLastRow || content.endsWith('\n')) {
+        candidates
+    } else {
+        candidates.dropLast(1)
+    }
+    return StreamingTableShape(prefix, rows)
+}
+
+private fun streamingTableSource(
+    shape: StreamingTableShape?,
+    visibleRows: Int,
+): String? = shape?.let {
+    (it.prefix + it.rows.take(visibleRows)).joinToString("\\n")
+}
 
 /**
  * Split a streaming buffer into ordered table rows without waiting for the
@@ -916,7 +957,18 @@ private fun MarkdownBlockBody(
     // breaker/degrade only cover isStreaming=true). Those parse off-main
     // with a bounded plain-text preview in the meantime — same structure as
     // the live branch below.
-    if (!isStreaming) {
+    // Remember whether this composition has ever been live. When the stream
+    // ends, the final flat-item snapshot can arrive before the row gate has
+    // released the last table rows. Keeping the table path alive for that
+    // handoff prevents the frozen parser from popping the remaining table in
+    // one frame.
+    var everStreamed by remember { mutableStateOf(isStreaming) }
+    SideEffect {
+        if (isStreaming) everStreamed = true
+    }
+    val tableHandoff = everStreamed && looksLikeMarkdownTable(rawText)
+
+    if (!isStreaming && !tableHandoff) {
         val cached = remember(rawText) { MarkdownParseCaches.cachedBlocks(rawText) }
         // [T-android-longtext-anr] Synchronous render ONLY on a real cache HIT.
         // The old `|| rawText.length <= COLD_PARSE_OFFMAIN_THRESHOLD_CHARS` clause
@@ -979,11 +1031,34 @@ private fun MarkdownBlockBody(
     // received row becomes a real row immediately.
     if (looksLikeMarkdownTable(rawText)) {
         val mdColors = currentMdColors()
-        val latestTableText by rememberUpdatedState(rawText)
-        var tableBlocks by remember {
+        val tableShape = streamingTableShape(
+            rawText,
+            // While live, hold back an unterminated row until its newline
+            // arrives. At the terminal edge it is a real final row and must
+            // be included, otherwise the last row appears only after the
+            // table has already switched to the frozen renderer.
+            includePartialLastRow = !isStreaming,
+        )
+        val tableKey = tableShape?.prefix?.joinToString("\n") ?: ""
+        var visibleRows by remember(tableKey) { mutableStateOf(0) }
+        val targetRows = tableShape?.rows?.size ?: 0
+        // A provider burst may contain many complete table rows. Release one
+        // row per tick instead of handing the entire burst to RenderTable.
+        // The old path parsed every received row at once; RenderTable is one
+        // Layout, so that made a whole table pop into existence in a single
+        // frame even though the text typewriter was enabled upstream.
+        LaunchedEffect(tableKey, targetRows) {
+            while (visibleRows < targetRows) {
+                delay(80L)
+                visibleRows++
+            }
+        }
+        val visibleTableSource = streamingTableSource(tableShape, visibleRows)
+        val latestTableText by rememberUpdatedState(visibleTableSource ?: rawText)
+        var tableBlocks by remember(tableKey) {
             mutableStateOf<List<MdBlock>>(emptyList())
         }
-        LaunchedEffect(mdColors) {
+        LaunchedEffect(mdColors, tableKey) {
             snapshotFlow { latestTableText }
                 .distinctUntilChanged()
                 .conflate()
@@ -1001,13 +1076,13 @@ private fun MarkdownBlockBody(
         Column(modifier = modifier) {
             if (tableBlocks.isEmpty()) {
                 Text(
-                    text = rawText,
+                    text = visibleTableSource ?: rawText,
                     fontSize = BaseFontSize,
                     lineHeight = BaseLineHeight,
                     color = currentMdColors().text,
                 )
             } else {
-                tableBlocks.forEach { block -> RenderBlock(block) }
+                tableBlocks.forEach { block -> RenderBlock(block, isStreaming = true) }
             }
         }
         return
@@ -1724,7 +1799,7 @@ private fun parseTable(lines: List<String>): Pair<List<String>, List<List<String
 // ─── Block renderers ────────────────────────────────────────────────────────
 
 @Composable
-private fun RenderBlock(block: MdBlock) {
+private fun RenderBlock(block: MdBlock, isStreaming: Boolean = false) {
     val colors = currentMdColors()
     // [T-android-streaming-incremental-inline] The live streaming tail block
     // re-parses its growing paragraph every throttle tick; route it through the
@@ -2154,7 +2229,7 @@ private fun RenderBlock(block: MdBlock) {
         }
 
         is MdBlock.Table -> {
-            RenderTable(block)
+            RenderTable(block, isStreaming)
         }
 
         is MdBlock.MathDisplay -> {
