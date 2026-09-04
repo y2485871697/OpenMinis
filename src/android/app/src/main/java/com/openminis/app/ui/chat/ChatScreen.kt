@@ -597,6 +597,15 @@ private fun liveStreamingDelta(
     var displayedText by remember(messageId, animateTextBlockId) {
         mutableStateOf("")
     }
+    val isTableStream = remember(messageId, animateTextBlockId) {
+        mutableStateOf(false)
+    }
+    SideEffect {
+        if (!isTableStream.value) {
+            isTableStream.value = targetBlockText.contains("|") &&
+                targetBlockText.lineSequence().take(4).count { it.contains("|") } >= 2
+        }
+    }
     // Keep the presentation loop alive while transport snapshots change. A
     // rememberUpdatedState gives the loop the newest target without putting
     // that target in LaunchedEffect's key set (which would cancel/restart the
@@ -647,6 +656,23 @@ private fun liveStreamingDelta(
             } else if (elapsedNs >= frameIntervalNs && displayedText.length < targetText.length) {
                 elapsedNs -= frameIntervalNs
                 var next = displayedText.length
+                if (isTableStream.value) {
+                    // Tables must advance at row boundaries, not at an
+                    // arbitrary character count. A network burst can contain
+                    // several complete rows; expose only the next newline-
+                    // terminated row per display tick. The final unterminated
+                    // row is released when the transport has ended.
+                    val nextNewline = targetText.indexOf('\n', displayedText.length)
+                    next = when {
+                        nextNewline >= 0 -> nextNewline + 1
+                        !presentationActive && !hasLiveTarget.value -> targetText.length
+                        else -> displayedText.length
+                    }
+                    if (next == displayedText.length) {
+                        elapsedNs = 0L
+                        continue
+                    }
+                }
                 // [T-rikkahub-burst-smooth] Backlog-scaled release rate. The
                 // fixed 2-cp/frame cadence (~62 cps) was tuned for smooth
                 // trickle streams, but this network/provider delivers output
