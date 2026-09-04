@@ -9,6 +9,7 @@ class LiveAssistantTextItemTest {
     private fun message(text: String, streaming: Boolean) = ChatMessage(
         id = "m1",
         role = "assistant",
+        content = text,
         isStreaming = streaming,
         toolBlocks = listOf(AssistantBlock(id = "b1", kind = "text", content = text)),
     )
