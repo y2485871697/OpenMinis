@@ -2220,7 +2220,15 @@ fun ChatScreen(
         }
             .distinctUntilChanged()
             .collect {
-                if (!viewModel.isStreaming.value) return@collect
+                // [T-android-stream-end-drain-follow] Keep pinning to the
+                // bottom while the local presenter drains the last assistant
+                // message. The VM isStreaming flag drops as soon as the
+                // transport ends, but the live tail can still grow for a
+                // few hundred milliseconds; stopping the layout-follow here
+                // lets the viewport drift until the 220ms settle kicks in.
+                val sinceStreamEnd = System.currentTimeMillis() - lastStreamEndMs
+                val stillDraining = sinceStreamEnd in 0..1500
+                if (!viewModel.isStreaming.value && !stillDraining) return@collect
                 if (userScrolledAway || listState.isScrollInProgress) return@collect
                 listState.requestScrollToItem(0, 0)
             }
