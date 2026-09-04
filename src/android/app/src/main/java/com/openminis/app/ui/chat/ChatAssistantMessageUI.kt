@@ -438,6 +438,22 @@ internal fun BoundsTrackedBlock(
     messageId: String,
     slotKey: String,
     markdown: String,
+    /**
+     * [T-android-stream-table-jank] Size-animate this row's height changes.
+     * MUST be false for the actively-streaming row: the typewriter + live
+     * table re-parse grow the row many times per second, so the spring never
+     * settles — the reported height lags the real content, the rows above
+     * ride the lagging value, and the bottom-follow pin (requestScrollToItem)
+     * then yanks the viewport against the animation every layout tick. That
+     * fight is the ±90 px/frame viewport oscillation measured on the
+     * 2026-09-04 table-streaming recordings (rikkahub reference: |dy| p90
+     * 17 px, 0.3% violent frames; Minis: p90 38 px, 20% violent frames).
+     * Instant layout keeps the reverse-layout bottom anchor stable: growth
+     * extends the row upward by exactly the appended content, once per
+     * change. Frozen rows keep the animation — their height only changes on
+     * rare collapse/expand transitions.
+     */
+    animateSize: Boolean = true,
     content: @Composable () -> Unit,
 ) {
     val registry = LocalMessageBoundsRegistry.current
@@ -445,8 +461,9 @@ internal fun BoundsTrackedBlock(
         modifier = Modifier
             // RikkaHub keeps the message row stable and lets Compose animate
             // only its changing height; this avoids whole-list jumps while a
-            // provider emits successive text parts.
-            .animateContentSize()
+            // provider emits successive text parts. Streaming rows opt out —
+            // see [animateSize].
+            .then(if (animateSize) Modifier.animateContentSize() else Modifier)
             .onGloballyPositioned { coords ->
                 registry?.put(messageId, slotKey, coords.boundsInWindow(), markdown)
             },

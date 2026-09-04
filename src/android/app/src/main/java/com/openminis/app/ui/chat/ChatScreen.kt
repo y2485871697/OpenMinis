@@ -2088,6 +2088,14 @@ fun ChatScreen(
     // when the newest row grows and the user was already following, request a
     // new bottom layout. There is no sampling, catch-up animation or per-frame
     // scroll loop, so rendering work cannot queue behind scroll work.
+    //
+    // [T-android-stream-table-jank] Only fire when the bottom row has
+    // actually DRIFTED from the viewport end. With reverseLayout the newest
+    // row stays bottom-anchored while it grows (the scroll anchor preserves
+    // offset 0), so during normal streaming this pin is a no-op — firing it
+    // on every layout tick didn't just waste work, each redundant
+    // requestScrollToItem fought whatever animation/reflow was mid-flight
+    // and read as a viewport teleport (see BoundsTrackedBlock [animateSize]).
     LaunchedEffect(listState, userScrolledAway) {
         snapshotFlow {
             val info = listState.layoutInfo
@@ -2099,8 +2107,9 @@ fun ChatScreen(
             .collect {
                 if (!viewModel.isStreaming.value) return@collect
                 if (userScrolledAway || listState.isScrollInProgress) return@collect
-                val newestIsVisible = listState.layoutInfo.visibleItemsInfo.any { it.index == 0 }
-                if (newestIsVisible) {
+                val newest = listState.layoutInfo.visibleItemsInfo
+                    .firstOrNull { it.index == 0 } ?: return@collect
+                if (newest.offset != 0) {
                     listState.requestScrollToItem(0, 0)
                 }
             }
@@ -4321,6 +4330,7 @@ fun ChatScreen(
                                     messageId = item.messageId,
                                     slotKey = "text:${item.block.id}",
                                     markdown = liveMarkdown,
+                                    animateSize = !item.isStreaming,
                                 ) {
                                     LargeContentGuard(
                                         content = liveBlock.content,
@@ -4384,6 +4394,7 @@ fun ChatScreen(
                                     messageId = item.messageId,
                                     slotKey = "mdblock:${item.parentBlockId}:${item.blockIndex}",
                                     markdown = liveMarkdown,
+                                    animateSize = !item.isStreaming,
                                 ) {
                                     LargeContentGuard(
                                         content = liveRawText,
