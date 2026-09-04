@@ -534,30 +534,19 @@ private fun toolBlocksForFloatingBar(
     return result
 }
 
-/**
- * [T-android-stream-arrival-pace] Sampled view of the live streaming delta
- * for one message, published at most once per display frame. RikkaHub parity:
- * the received snapshot is rendered AT ARRIVAL SPEED — there is no typewriter.
- *
- * [T-android-stream-burst-smoothing] When [smoothTextBlockId] is set, that
- * text block is presented through a bounded adaptive smoother: the displayed
- * prefix chases the received snapshot at `backlog / SMOOTH_WINDOW_FRAMES`
- * code points per frame. RikkaHub has no such layer — its perceived
- * steadiness comes from the model emitting slowly. Our repeat-retry scenario
- * hits the gateway's KV cache, which replays the whole reply in seconds (313
- * chunks/s measured); raw arrival rendering then reads as an instant dump.
- * The smoother shapes only bursts: a steady provider is rendered
- * near-unthrottled (3 cp/frame floor), and the worst-case presentation lag
- * is bounded to SMOOTH_WINDOW_FRAMES/60 ≈ 4 s — the old fixed-rate
- * typewriter's failure mode (30 s+ tail, stuck-then-dump) is structurally
- * impossible because the release rate always scales with the backlog.
- */
 @OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
 private fun liveStreamingDelta(
     viewModel: ChatViewModel,
     messageId: String,
-    smoothTextBlockId: String? = null,
+    /**
+     * When set, smooth the text block identified by this id. Provider SSE
+     * chunks are transport-sized, not display-sized: a gateway can deliver
+     * several hundred characters in one read. RikkaHub keeps the received
+     * snapshot separate from the text currently painted, so a burst is
+     * released over display frames instead of appearing as a whole paragraph.
+     */
+    animateTextBlockId: String? = null,
     fallbackTarget: StreamingDelta? = null,
     presentationActive: Boolean = true,
 ): StreamingDelta? {
@@ -572,29 +561,37 @@ private fun liveStreamingDelta(
     }
     val target by flow.collectAsState(initial = null)
     val currentTarget = target ?: fallbackTarget ?: return null
-    if (smoothTextBlockId == null) return currentTarget
+    if (animateTextBlockId == null) return currentTarget
 
     val targetBlockText = currentTarget.toolBlocks
-        .firstOrNull { it.id == smoothTextBlockId && it.kind == "text" }
+        .firstOrNull { it.id == animateTextBlockId && it.kind == "text" }
         ?.content
         ?: currentTarget.content
-    var displayedText by remember(messageId, smoothTextBlockId) {
+    var displayedText by remember(messageId, animateTextBlockId) {
         mutableStateOf("")
     }
-    // The loop reads the newest target through rememberUpdatedState so that
-    // target changes never cancel/restart the pacing loop.
+    // Keep the presentation loop alive while transport snapshots change. A
+    // rememberUpdatedState gives the loop the newest target without putting
+    // that target in LaunchedEffect's key set (which would cancel/restart the
+    // typewriter on every provider chunk).
     val latestTargetText = rememberUpdatedState(targetBlockText)
     val hasLiveTarget = rememberUpdatedState(target != null)
 
-    LaunchedEffect(messageId, smoothTextBlockId, presentationActive) {
+    // Provider reads can contain a whole paragraph after a network pause. The
+    // received snapshot is the buffer; this fixed frame-paced loop is the
+    // presentation clock. It deliberately releases a constant two Unicode
+    // code points every ~32ms instead of speeding up for larger backlogs, so
+    // a slow/fast network cannot turn into visible bursts or variable typing
+    // speed. A long UI frame is capped to one release, never a catch-up burst.
+    LaunchedEffect(messageId, animateTextBlockId, presentationActive) {
         val frameIntervalNs = 32_000_000L
+        val codePointsPerFrame = 2
         var previousFrameNs = 0L
         var elapsedNs = 0L
         while (true) {
-            // After the transport drains, keep smoothing until the displayed
-            // prefix catches up with the canonical content — the lag is
-            // bounded by the smoothing window (~4 s), never the old fixed
-            // typewriter's 30 s+ tail.
+            // After transport ends, wait for the side-channel to drain and
+            // stop only after the canonical final snapshot catches up with
+            // the text already painted on screen.
             val terminalTarget = latestTargetText.value
             if (!presentationActive &&
                 !hasLiveTarget.value &&
@@ -613,25 +610,21 @@ private fun liveStreamingDelta(
             val targetText = latestTargetText.value
             if (!targetText.startsWith(displayedText)) {
                 // A retry/replacement is a new prefix; never expose a stale
-                // fragment. The snap is bounded by the smoothing window — at
-                // most ~4 s of content, vs the old fixed-rate typewriter's
-                // whole-reply snaps.
+                // fragment, but also do not replay it character by character.
                 displayedText = targetText
                 elapsedNs = 0L
             } else if (elapsedNs >= frameIntervalNs && displayedText.length < targetText.length) {
                 elapsedNs -= frameIntervalNs
-                val backlog = targetText.length - displayedText.length
-                val release = (backlog / SMOOTH_WINDOW_FRAMES).coerceIn(3, 24)
                 var next = displayedText.length
-                repeat(release) {
+                repeat(codePointsPerFrame) {
                     if (next < targetText.length) {
                         next = targetText.offsetByCodePoints(next, 1)
                     }
                 }
                 displayedText = targetText.substring(0, next)
             } else if (elapsedNs >= frameIntervalNs) {
-                // Caught up: discard accumulated time so the next chunk
-                // starts on the normal cadence instead of jumping.
+                // No pending text: discard accumulated time so the first new
+                // chunk starts on the normal cadence instead of jumping.
                 elapsedNs = 0L
             }
         }
@@ -643,7 +636,7 @@ private fun liveStreamingDelta(
         targetBlockText
     }
     val displayedBlocks = currentTarget.toolBlocks.map { block ->
-        if (block.id == smoothTextBlockId && block.kind == "text") {
+        if (block.id == animateTextBlockId && block.kind == "text") {
             block.copy(content = renderedText)
         } else {
             block
@@ -651,12 +644,6 @@ private fun liveStreamingDelta(
     }
     return currentTarget.copy(toolBlocks = displayedBlocks)
 }
-
-/**
- * [T-android-stream-burst-smoothing] Drain the burst backlog over ~4 s at
- * 60 fps: a 2200-char burst replays at ~540 cps, a 200-char one at ~180 cps.
- */
-private const val SMOOTH_WINDOW_FRAMES = 240
 
 @OptIn(ExperimentalMaterial3Api::class, kotlinx.coroutines.FlowPreview::class)
 @Composable
@@ -2101,14 +2088,6 @@ fun ChatScreen(
     // when the newest row grows and the user was already following, request a
     // new bottom layout. There is no sampling, catch-up animation or per-frame
     // scroll loop, so rendering work cannot queue behind scroll work.
-    //
-    // [T-android-stream-table-jank] Only fire when the bottom row has
-    // actually DRIFTED from the viewport end. With reverseLayout the newest
-    // row stays bottom-anchored while it grows (the scroll anchor preserves
-    // offset 0), so during normal streaming this pin is a no-op — firing it
-    // on every layout tick didn't just waste work, each redundant
-    // requestScrollToItem fought whatever animation/reflow was mid-flight
-    // and read as a viewport teleport (see BoundsTrackedBlock [animateSize]).
     LaunchedEffect(listState, userScrolledAway) {
         snapshotFlow {
             val info = listState.layoutInfo
@@ -2120,9 +2099,8 @@ fun ChatScreen(
             .collect {
                 if (!viewModel.isStreaming.value) return@collect
                 if (userScrolledAway || listState.isScrollInProgress) return@collect
-                val newest = listState.layoutInfo.visibleItemsInfo
-                    .firstOrNull { it.index == 0 } ?: return@collect
-                if (newest.offset != 0) {
+                val newestIsVisible = listState.layoutInfo.visibleItemsInfo.any { it.index == 0 }
+                if (newestIsVisible) {
                     listState.requestScrollToItem(0, 0)
                 }
             }
@@ -4303,16 +4281,11 @@ fun ChatScreen(
                             } // close UserBubble SideEffect + UserMessageBubble block
                             is FlatChatItem.AssistantHeader -> AssistantHeader()
                             is FlatChatItem.AssistantText -> {
-                                // [T-android-stream-burst-smoothing] The
-                                // live row presents the received text through
-                                // the bounded adaptive smoother (burst
-                                // replay from the gateway KV cache otherwise
-                                // reads as an instant dump). presentation
-                                // survives the transport drain: fallback to
-                                // the canonical snapshot keeps the smoother
-                                // draining until caught up (~4 s worst
-                                // case), then the loop breaks and liveDelta
-                                // naturally resolves to item.block.
+                                // Keep the presenter alive after transport
+                                // ends. The row identity remains stable, so
+                                // its displayed prefix can continue toward
+                                // the canonical final message without a
+                                // full-snapshot jump.
                                 var wasStreaming by remember(item.messageId, item.block.id) {
                                     mutableStateOf(false)
                                 }
@@ -4331,7 +4304,7 @@ fun ChatScreen(
                                     liveStreamingDelta(
                                         viewModel,
                                         item.messageId,
-                                        smoothTextBlockId = item.block.id,
+                                        animateTextBlockId = item.block.id,
                                         fallbackTarget = fallbackTarget,
                                         presentationActive = item.isStreaming,
                                     )
@@ -4348,7 +4321,6 @@ fun ChatScreen(
                                     messageId = item.messageId,
                                     slotKey = "text:${item.block.id}",
                                     markdown = liveMarkdown,
-                                    animateSize = !item.isStreaming,
                                 ) {
                                     LargeContentGuard(
                                         content = liveBlock.content,
@@ -4380,7 +4352,11 @@ fun ChatScreen(
                                 // their immutable row snapshot and must not
                                 // subscribe to the token-rate StateFlow.
                                 val liveDelta = if (item.isStreaming) {
-                                    liveStreamingDelta(viewModel, item.messageId)
+                                    liveStreamingDelta(
+                                        viewModel,
+                                        item.messageId,
+                                        animateTextBlockId = item.parentBlockId,
+                                    )
                                 } else {
                                     null
                                 }
@@ -4408,7 +4384,6 @@ fun ChatScreen(
                                     messageId = item.messageId,
                                     slotKey = "mdblock:${item.parentBlockId}:${item.blockIndex}",
                                     markdown = liveMarkdown,
-                                    animateSize = !item.isStreaming,
                                 ) {
                                     LargeContentGuard(
                                         content = liveRawText,
@@ -4737,7 +4712,13 @@ fun ChatScreen(
                         viewModel.streamingById,
                     ) { msgs, stream ->
                         toolBlocksForFloatingBar(msgs, stream)
-                    }.collect { lastToolBlocks = it }
+                    }
+                        // Tool arguments can arrive as many tiny deltas. The
+                        // floating bar only needs a stable UI snapshot, not
+                        // every transport event; RikkaHub applies a 50ms part
+                        // boundary for the same reason.
+                        .sample(50L)
+                        .collect { lastToolBlocks = it }
                 }
                 val allToolBlocks = lastToolBlocks
                 if (lastToolBlocks.isNotEmpty()) {
