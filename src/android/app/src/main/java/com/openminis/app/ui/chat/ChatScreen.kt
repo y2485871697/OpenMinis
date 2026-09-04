@@ -2106,6 +2106,14 @@ fun ChatScreen(
     // when the newest row grows and the user was already following, request a
     // new bottom layout. There is no sampling, catch-up animation or per-frame
     // scroll loop, so rendering work cannot queue behind scroll work.
+    //
+    // [T-android-streaming-table-follow] The previous "only if newest is
+    // already visible" guard was too conservative once the live tail was split
+    // into multiple fine-grained fragments (ChatFlatItems v18). A fast-growing
+    // table can push index 0 briefly below the viewport before the follow
+    // snapshot runs, leaving the user stuck mid-reply. If the user has not
+    // explicitly scrolled away (and isn't actively dragging), always request
+    // the bottom item so streaming content stays in view.
     LaunchedEffect(listState, userScrolledAway) {
         snapshotFlow {
             val info = listState.layoutInfo
@@ -2117,10 +2125,7 @@ fun ChatScreen(
             .collect {
                 if (!viewModel.isStreaming.value) return@collect
                 if (userScrolledAway || listState.isScrollInProgress) return@collect
-                val newestIsVisible = listState.layoutInfo.visibleItemsInfo.any { it.index == 0 }
-                if (newestIsVisible) {
-                    listState.requestScrollToItem(0, 0)
-                }
+                listState.requestScrollToItem(0, 0)
             }
     }
     // T256: stage-2/3 settle moved out of the per-token LE — runs once on
