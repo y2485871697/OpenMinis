@@ -1302,7 +1302,9 @@ private val inlineMediaRegex = Regex("""!\[([^\]\n]*)]\(([^)\s]+)\)""")
 private val thematicBreakRegex = Regex("^[-*_]{3,}\\s*$")
 private val standaloneImageLineRegex = Regex("^!\\[.*]\\(.*\\)\\s*$")
 private val imageMatchRegex = Regex("^!\\[(.*)\\]\\((.*)\\)")
-private val tableSeparatorRegex = Regex("^\\|?[\\s\\-:|]+\\|?$")
+private val tableSeparatorRegex = Regex(
+    "^\\|?\\s*:?-{3,}:?\\s*(?:\\|\\s*:?-{3,}:?\\s*)+\\|?$",
+)
 private val taskListItemRegex = Regex("^[-*+]\\s+\\[[ xX]\\]\\s+.*")
 private val taskListPrefixRegex = Regex("^[-*+]\\s+\\[[ xX]\\]\\s+")
 private val bulletListItemRegex = Regex("^[-*+]\\s+.*")

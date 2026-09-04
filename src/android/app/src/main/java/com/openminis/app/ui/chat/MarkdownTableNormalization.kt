@@ -15,4 +15,6 @@ internal fun normalizeMarkdownTableEscapes(text: String): String {
     return normalized.replace("\\n", "\n")
 }
 
-private val MARKDOWN_TABLE_SEPARATOR = Regex("^\\|?[\\s\\-:|]+\\|?$")
+private val MARKDOWN_TABLE_SEPARATOR = Regex(
+    "^\\|?\\s*:?-{3,}:?\\s*(?:\\|\\s*:?-{3,}:?\\s*)+\\|?$",
+)
