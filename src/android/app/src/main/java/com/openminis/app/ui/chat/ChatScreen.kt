@@ -615,8 +615,21 @@ private fun liveStreamingDelta(
                 elapsedNs = 0L
             } else if (elapsedNs >= frameIntervalNs && displayedText.length < targetText.length) {
                 elapsedNs -= frameIntervalNs
+                // [T-android-stream-burst] Adaptive release. A fixed 2 code
+                // points per frame (~62 cps) cannot keep up with a fast
+                // gateway: the 2026-09-05 table-streaming capture shows
+                // deepseek-v4-flash delivering 2172 chars in ~6 s (313 SSE
+                // chunks in one second). The backlog then either trails the
+                // transport by half a minute or snaps forward through the
+                // non-prefix fallback below — the user sees "everything
+                // appears at once". Drain the backlog over a ~3 s window
+                // instead: 12 cp/frame ceiling ≈ 750 cps floor removal, so
+                // the visible stream tracks the provider while still reading
+                // as streaming, and the fallback jump almost never fires.
+                val backlog = targetText.length - displayedText.length
+                val release = (backlog / 180).coerceIn(codePointsPerFrame, 12)
                 var next = displayedText.length
-                repeat(codePointsPerFrame) {
+                repeat(release) {
                     if (next < targetText.length) {
                         next = targetText.offsetByCodePoints(next, 1)
                     }
