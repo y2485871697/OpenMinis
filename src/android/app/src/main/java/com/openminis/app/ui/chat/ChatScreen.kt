@@ -4304,7 +4304,6 @@ fun ChatScreen(
                                     liveStreamingDelta(
                                         viewModel,
                                         item.messageId,
-                                        animateTextBlockId = item.block.id,
                                         fallbackTarget = fallbackTarget,
                                         presentationActive = item.isStreaming,
                                     )
@@ -4355,7 +4354,6 @@ fun ChatScreen(
                                     liveStreamingDelta(
                                         viewModel,
                                         item.messageId,
-                                        animateTextBlockId = item.parentBlockId,
                                     )
                                 } else {
                                     null
