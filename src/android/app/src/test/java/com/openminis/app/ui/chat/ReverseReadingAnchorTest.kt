@@ -58,6 +58,6 @@ class ReverseReadingAnchorTest {
             .map { File(it, "com/openminis/app/ui/chat/ChatScreen.kt") }.first { it.isFile }.readText()
         assertTrue(source.contains("userScrolledAway && pendingSearchMessageId == null"))
         assertTrue(source.contains("liveAnchorKey == current.key && draining"))
-        assertTrue(source.contains("listState.dispatchRawDelta(growth.toFloat())"))
+        assertTrue(source.contains("listState.dispatchRawDelta(growth.toFloat())"))`n        assertTrue(source.contains("growth > 0 && !dragging"))
     }
 }
