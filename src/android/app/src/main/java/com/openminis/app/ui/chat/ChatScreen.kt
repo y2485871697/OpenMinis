@@ -1997,6 +1997,7 @@ fun ChatScreen(
             // logs here added measurable load. Gate behind a constant.
             when (interaction) {
                 is androidx.compose.foundation.interaction.DragInteraction.Start -> {
+                    pendingSearchMessageId = null
                     isUserDragging = true
                     followCompletedStream = false
                     userDragAwaitingSettle = true
@@ -2045,7 +2046,7 @@ fun ChatScreen(
     // FAB taps also work because the FAB onClick path resets userScrolledAway
     // directly (line 1124) and never relies on this LE.
     LaunchedEffect(isNearBottom.value) {
-        if (isNearBottom.value && userScrolledAway) {
+        if (pendingSearchMessageId == null && isNearBottom.value && userScrolledAway) {
             val sinceDragMs = System.currentTimeMillis() - lastInterruptMs
             // KEEP userScrolledAway when no recent drag — the at-bottom
             // reading came from a stream-end layout reflow, not a real
@@ -2065,7 +2066,7 @@ fun ChatScreen(
     // they were reading.
     val imeBottomPx = WindowInsets.ime.getBottom(LocalDensity.current)
     LaunchedEffect(imeBottomPx) {
-        if (userScrolledAway && isNearBottom.value) userScrolledAway = false
+        if (pendingSearchMessageId == null && userScrolledAway && isNearBottom.value) userScrolledAway = false
     }
     // [T-android-tool-autoscroll] Start-of-turn edge from ViewModel: resume() /
     // retryLast() / retryFromMessage() / rerunFromToolBlock() emit Unit on
@@ -2077,6 +2078,7 @@ fun ChatScreen(
         viewModel.forceScrollToBottom.collect {
             // Match the user-send path: clear any prior "scrolled away" flag
             // so the streaming auto-follow stays active for the new turn.
+            pendingSearchMessageId = null
             userScrolledAway = false
             tracedScrollToItem("FORCE-SCROLL-TO-BOTTOM(resume/retry/rerun)", 0, 0)
         }
@@ -2091,6 +2093,7 @@ fun ChatScreen(
         // entry points) restores auto-follow even if a call-site reset
         // was missed.
         lastUserAppendMs = System.currentTimeMillis()
+        pendingSearchMessageId = null
         userScrolledAway = false
         tracedScrollToItem("LE(messages.size)USER-SEND-SNAP", 0, 0)
     }
@@ -3647,7 +3650,11 @@ fun ChatScreen(
                         }
                     }
                 }
-                LaunchedEffect(pendingSearchMessageId, flatItems) {
+                val searchLeadingRows = (if (compactProgress != null) 1 else 0) +
+                    (if (canResume && !isStreaming && error == null &&
+                        messages.lastOrNull { it.role == "assistant" }?.error?.isNotBlank() != true
+                    ) 1 else 0)
+                LaunchedEffect(pendingSearchMessageId, flatItems, imeBottomPx, searchLeadingRows) {
                     val target = pendingSearchMessageId ?: return@LaunchedEffect
                     val originalIndex = flatItems.indexOfFirst { item ->
                         when (item) {
@@ -3664,32 +3671,45 @@ fun ChatScreen(
                             is FlatChatItem.AssistantLegacyContent -> item.messageId == target
                         }
                     }
-                    if (originalIndex >= 0) {
-                        val displayIndex = flatItems.lastIndex - originalIndex
-                        userScrolledAway = true
-                        followCompletedStream = false
-                        tracedScrollToItem("MESSAGE-SEARCH", displayIndex, 0)
-                        // reverseLayout places offset=0 at the visual bottom.
-                        // Materialise the first row of the target message, read
-                        // its actual height, then use the same calibrated
-                        // top-edge formula as the previous-turn button.
-                        withFrameNanos { }
-                        val layout = listState.layoutInfo
-                        val placed = layout.visibleItemsInfo.firstOrNull {
-                            it.index == displayIndex
+                    if (originalIndex < 0) return@LaunchedEffect
+                    val targetKey = flatItems[originalIndex].key
+                    val fallbackIndex = chatSearchDisplayIndex(flatItems.size, originalIndex, searchLeadingRows)
+                    userScrolledAway = true
+                    followCompletedStream = false
+                    lastInterruptMs = 0L
+                    var previousGeometry: List<Int>? = null
+                    var lastCorrection: List<Int>? = null
+                    var stableSince = 0L
+                    val started = withFrameNanos { it }
+                    // Re-measure through keyboard dismissal and async row placement, but never
+                    // retain a permanent scroll lock. A real drag cancels pendingSearchMessageId.
+                    kotlinx.coroutines.withTimeoutOrNull(2000L) {
+                        while (pendingSearchMessageId == target && !isUserDragging && userScrolledAway) {
+                            val now = withFrameNanos { it }
+                            val layout = listState.layoutInfo
+                            val placed = layout.visibleItemsInfo.firstOrNull { it.key == targetKey }
+                            if (placed == null) {
+                                tracedScrollToItem("MESSAGE-SEARCH", fallbackIndex, 0)
+                                previousGeometry = null
+                                continue
+                            }
+                            val geometry = listOf(placed.size, layout.viewportSize.height,
+                                layout.beforeContentPadding, layout.afterContentPadding)
+                            if (geometry != previousGeometry) {
+                                previousGeometry = geometry
+                                stableSince = now
+                            }
+                            val topOffset = chatSearchTopOffset(geometry[0], geometry[1], geometry[2], geometry[3])
+                            val correction = geometry + listOf(placed.index, placed.offset)
+                            if (kotlin.math.abs(placed.offset + topOffset) > 1 && correction != lastCorrection) {
+                                lastCorrection = correction
+                                tracedScrollToItem("MESSAGE-SEARCH-TOP", placed.index, topOffset)
+                            }
+                            if (imeBottomPx == 0 && now - stableSince >= 300_000_000L &&
+                                now - started >= 600_000_000L) break
                         }
-                        if (placed != null) {
-                            val topOffset = placed.size -
-                                layout.viewportSize.height +
-                                layout.beforeContentPadding
-                            tracedScrollToItem(
-                                "MESSAGE-SEARCH-TOP",
-                                displayIndex,
-                                topOffset,
-                            )
-                        }
-                        pendingSearchMessageId = null
                     }
+                    if (pendingSearchMessageId == target) pendingSearchMessageId = null
                 }
                 // T304: when a new tool-use item appears at the trailing
                 // edge (head of flatItems with reverseLayout=true), pin
@@ -7050,8 +7070,14 @@ fun ChatScreen(
                     onDismiss = { showMessageSearch = false },
                     onSelect = { messageId ->
                         showMessageSearch = false
-                        viewModel.revealMessage(messageId)
-                        pendingSearchMessageId = messageId
+                        val hitIndex = allMessages.indexOfFirst { it.id == messageId }
+                        val anchorIndex = chatSearchAnchorIndex(allMessages.map { it.role }, hitIndex)
+                        val anchorId = allMessages.getOrNull(anchorIndex)?.id ?: messageId
+                        userScrolledAway = true
+                        followCompletedStream = false
+                        lastInterruptMs = 0L
+                        viewModel.revealMessage(anchorId)
+                        pendingSearchMessageId = anchorId
                     },
                 )
             }
