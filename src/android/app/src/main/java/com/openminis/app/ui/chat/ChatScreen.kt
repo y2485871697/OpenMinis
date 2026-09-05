@@ -3753,7 +3753,27 @@ fun ChatScreen(
                 // pin to once per new row across flatten publishes.
                 var lastTrailingPinKey by remember(sessionId) { mutableStateOf<String?>(null) }
                 LaunchedEffect(flatItems) {
-                    // Pin once per new trailing tool/typing row, key-deduped,
+                                         // The final canonical-message handoff can publish a new
+                     // flatItems list after the stream-end settle timer already
+                     // ran. Wait for that list's first layout frame, then restore
+                     // the bottom once more if the user was following the reply.
+                     // Without this handoff pin, the final text/table height can
+                     // remain stale until a manual up/down gesture triggers a
+                     // LazyColumn remeasure.
+                     val sinceStreamEnd = System.currentTimeMillis() - lastStreamEndMs
+                     if (!viewModel.isStreaming.value &&
+                         lastStreamEndMs > 0L &&
+                         sinceStreamEnd in 0..STREAM_END_ARM_GRACE_MS &&
+                         !userScrolledAway &&
+                         !listState.isScrollInProgress &&
+                         !isNearBottom.value
+                     ) {
+                         withFrameNanos { }
+                         if (!userScrolledAway && !listState.isScrollInProgress) {
+                             tracedScrollToItem("flatItems/stream-end-repin", 0, 0)
+                         }
+                         return@LaunchedEffect
+                     }                    // Pin once per new trailing tool/typing row, key-deduped,
                     // not on every flatten publish, so streaming tool-arg
                     // ticks don't fight the user. flatItems is oldest-first
                     // (rendered via asReversed()), so the newest row is at
