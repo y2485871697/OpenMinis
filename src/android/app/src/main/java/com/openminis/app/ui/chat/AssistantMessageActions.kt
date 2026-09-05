@@ -1,7 +1,6 @@
 package com.openminis.app.ui.chat
 
 import android.content.Intent
-import android.net.Uri
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
@@ -23,7 +22,6 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
@@ -213,10 +211,7 @@ internal fun AssistantMessageActions(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                MessageMoreAction(Icons.Default.Public, context.getString(R.string.message_action_web_render)) {
-                    showMore = false
-                    openReplyInBrowser(context, messageMarkdown)
-                }
+
                 MessageMoreAction(Icons.Default.Edit, context.getString(R.string.message_action_edit)) {
                     showMore = false
                     showEdit = true
@@ -326,11 +321,4 @@ private fun shareReply(context: android.content.Context, text: String) {
         putExtra(Intent.EXTRA_TEXT, text)
     }
     context.startActivity(Intent.createChooser(intent, context.getString(R.string.message_action_share)))
-}
-
-private fun openReplyInBrowser(context: android.content.Context, text: String) {
-    val escaped = android.text.TextUtils.htmlEncode(text.take(100_000))
-    val html = """<!doctype html><meta name="viewport" content="width=device-width"><style>body{font-family:sans-serif;line-height:1.6;padding:20px;max-width:820px;margin:auto;white-space:pre-wrap;color:#202124}pre{overflow:auto}</style><body>$escaped</body>"""
-    val uri = Uri.parse("data:text/html;charset=utf-8," + Uri.encode(html))
-    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
 }

@@ -2792,12 +2792,6 @@ fun ChatScreen(
                                             modifier = Modifier.weight(1f, fill = false),
                                         )
 
-                                        activeBalanceValue?.let { balance ->
-                                            ProviderBalanceBadge(
-                                                value = balance,
-                                                modifier = Modifier.widthIn(max = 72.dp),
-                                            )
-                                        }
 
                                         // Show the badge whenever thinking is on,
                                         // and ALSO when it's Off but the active
@@ -2908,6 +2902,12 @@ fun ChatScreen(
                 },
                 actions = {
                     // iOS: "..." circle button → dropdown menu
+                    activeBalanceValue?.let { balance ->
+                        ProviderBalanceBadge(
+                            value = balance,
+                            modifier = Modifier.widthIn(max = 72.dp).padding(end = 4.dp),
+                        )
+                    }
                     Box {
                         IconButton(onClick = { showChatMenu = true }) {
                             Icon(Icons.Default.MoreVert, contentDescription = "More")

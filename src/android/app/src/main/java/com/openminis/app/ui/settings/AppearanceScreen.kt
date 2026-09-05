@@ -40,7 +40,6 @@ import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.FormatSize
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Home
-import androidx.compose.material.icons.outlined.Keyboard
 import androidx.compose.material.icons.outlined.Launch
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.LightMode
@@ -265,7 +264,6 @@ fun AppearanceScreen(
     var returnKeyBehavior by remember { mutableIntStateOf(prefs.getInt(KEY_RETURN_KEY_BEHAVIOR, 0)) }
     var keepScreenAwake by remember { mutableStateOf(prefs.getBoolean(KEY_KEEP_SCREEN_AWAKE, false)) }
     var toolPreview by remember { mutableStateOf(prefs.getBoolean(KEY_TOOL_PREVIEW, true)) }
-    var autoFocusAfterReply by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_FOCUS_AFTER_REPLY, true)) }
     var autoExpandThinking by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_EXPAND_THINKING, true)) }
     var streamingHaptics by remember { mutableStateOf(prefs.getBoolean(KEY_STREAMING_HAPTICS, true)) }
     var showChatTitle by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_CHAT_TITLE, true)) }
@@ -473,26 +471,6 @@ fun AppearanceScreen(
                 onCheckedChange = {
                     streamingHaptics = it
                     prefs.edit().putBoolean(KEY_STREAMING_HAPTICS, it).apply()
-                },
-                showDivider = false,
-            )
-        }
-
-        // [T-keyboard-auto-pop default flip] -- Auto-Focus After Reply --
-        // Default ON — most users want the composer ready for a follow-up
-        // immediately after the model finishes.
-        SettingsSection(
-            header = stringResource(R.string.appearance_section_auto_focus_after_reply),
-            footer = stringResource(R.string.appearance_auto_focus_after_reply_footer),
-        ) {
-            SettingsSwitchRow(
-                icon = Icons.Outlined.Keyboard,
-                iconColor = tileBlue,
-                title = stringResource(R.string.appearance_auto_focus_after_reply_title),
-                checked = autoFocusAfterReply,
-                onCheckedChange = {
-                    autoFocusAfterReply = it
-                    prefs.edit().putBoolean(KEY_AUTO_FOCUS_AFTER_REPLY, it).apply()
                 },
                 showDivider = false,
             )
