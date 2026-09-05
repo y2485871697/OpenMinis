@@ -28,6 +28,7 @@ import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.verticalDrag
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
