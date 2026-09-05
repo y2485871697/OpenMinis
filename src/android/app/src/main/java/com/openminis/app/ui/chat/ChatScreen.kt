@@ -2903,10 +2903,12 @@ fun ChatScreen(
                 actions = {
                     // iOS: "..." circle button → dropdown menu
                     activeBalanceValue?.let { balance ->
-                        ProviderBalanceBadge(
-                            value = balance,
-                            modifier = Modifier.widthIn(max = 72.dp).padding(end = 4.dp),
-                        )
+                        Box(
+                            modifier = Modifier.width(72.dp).padding(end = 4.dp),
+                            contentAlignment = Alignment.CenterEnd,
+                        ) {
+                            ProviderBalanceBadge(value = balance)
+                        }
                     }
                     Box {
                         IconButton(onClick = { showChatMenu = true }) {
