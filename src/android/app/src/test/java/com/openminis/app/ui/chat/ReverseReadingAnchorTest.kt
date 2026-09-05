@@ -54,11 +54,19 @@ class ReverseReadingAnchorTest {
         }
     }
     @Test fun integrationIsLimitedToPausedLiveRowsAndDoesNotCancelUserScroll() {
-        val source = sequenceOf(File("src/main/java"), File("app/src/main/java"))
-            .map { File(it, "com/openminis/app/ui/chat/ChatScreen.kt") }.first { it.isFile }.readText()
+        val sources = sequenceOf(File("src/main/java"), File("app/src/main/java"))
+        val source = sources.map { File(it, "com/openminis/app/ui/chat/ChatScreen.kt") }
+            .first { it.isFile }.readText()
+        val bridge = sources.map { File(it, "com/openminis/app/ui/chat/ReadingShiftBridge.kt") }
+            .first { it.isFile }.readText()
         assertTrue(source.contains("userScrolledAway && pendingSearchMessageId == null"))
-        assertTrue(source.contains("liveAnchorKey == current.key && draining"))
-        assertTrue(source.contains("listState.dispatchRawDelta(growth.toFloat())"))
+        // Growth accounting lives in the measure-phase bridge; the collector
+        // only drains what the bridge pre-paid, never re-diffs on its own.
+        assertTrue(source.contains(".readingShiftBridge {"))
+        assertTrue(source.contains("val owed = streamShiftBridge.takePending()"))
+        assertTrue(source.contains("listState.dispatchRawDelta(owed.toFloat())"))
+        assertTrue(bridge.contains("growth > 0 && liveLatch"))
+        assertTrue(bridge.contains("!reading || !draining"))
         assertTrue(source.contains("verticalArrangement = Arrangement.spacedBy(2.dp),"))
     }
 }
