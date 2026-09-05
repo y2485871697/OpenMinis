@@ -425,6 +425,7 @@ data class ProviderConfig(
     // faster summarizer without exposing it to minis-model-use tool calls.
     val contextCompressionModelEntryIds: MutableList<String> = mutableListOf(),
     val contextCompressionGroupIds: MutableList<String> = mutableListOf(),
+    var contextCompressionOrder: List<String> = emptyList(),
     // T273: bumped by ProviderRepository.saveConfig on every mutation so
     // data-class structural equals returns false even when callers mutate
     // inner MutableLists in place. Without this, MutableStateFlow's

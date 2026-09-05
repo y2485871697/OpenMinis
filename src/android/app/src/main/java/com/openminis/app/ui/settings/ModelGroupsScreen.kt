@@ -69,6 +69,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.stringResource
 import com.openminis.app.data.model.ModelGroup
+import com.openminis.app.data.model.contextCompressionTargets
 import com.openminis.app.data.model.RoutingStrategy
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.R
@@ -122,6 +123,15 @@ fun ModelGroupsScreen(
         // entry into the groups zone (the data shape would reject it
         // anyway, but a no-op is friendlier than a snap-back).
         when {
+            fromKey.startsWith("compact:") && toKey.startsWith("compact:") -> {
+                val current = providerRepository.config.value.contextCompressionTargets()
+                val fromIndex = current.indexOf(fromKey.removePrefix("compact:"))
+                val toIndex = current.indexOf(toKey.removePrefix("compact:"))
+                if (fromIndex < 0 || toIndex < 0) return@rememberReorderableLazyListState
+                providerRepository.reorderContextCompressionTargets(current.toMutableList().apply {
+                    add(toIndex, removeAt(fromIndex))
+                })
+            }
             fromKey.startsWith("agent_entry:") && toKey.startsWith("agent_entry:") -> {
                 val fromId = fromKey.removePrefix("agent_entry:")
                 val toId = toKey.removePrefix("agent_entry:")
@@ -362,6 +372,7 @@ fun ModelGroupsScreen(
             contextCompressionModelsSectionItems(
                 providerRepository = providerRepository,
                 config = config,
+                reorderState = reorderState,
                 onAddModelsTap = onAddContextCompressionModels,
                 onAddGroupsTap = onAddContextCompressionGroups,
             )
@@ -718,55 +729,54 @@ private fun LazyListScope.agentLoopModelsSectionItems(
 private fun LazyListScope.contextCompressionModelsSectionItems(
     providerRepository: ProviderRepository,
     config: com.openminis.app.data.model.ProviderConfig,
+    reorderState: ReorderableLazyListState,
     onAddModelsTap: () -> Unit,
     onAddGroupsTap: () -> Unit,
 ) {
-    val groups = config.contextCompressionGroupIds
-        .mapNotNull { id -> config.modelGroups.find { it.id == id } }
-        .distinctBy { it.id }
-    val entries = config.contextCompressionModelEntryIds
-        .mapNotNull { id -> config.modelEntries.find { it.id == id } }
-        .distinctBy { it.id }
-    val rows = buildList {
-        groups.forEach { group ->
-            val count = group.memberEntryIds.count { id -> config.modelEntries.any { it.id == id } }
-            add(Triple(group.name, "$count models", group.id))
-        }
-        entries.forEach { entry ->
-            val label = config.instances.find { it.id == entry.providerInstanceId }?.label.orEmpty()
-            add(Triple(entry.model.displayName, label, entry.id))
-        }
-    }
-
+    val rows = config.contextCompressionTargets()
     item("context_compression_section_spacer") {
         Spacer(modifier = Modifier.height(SectionDesign.SectionTopGap))
     }
     item("context_compression_section_header") {
         SectionHeader(text = stringResource(R.string.context_compression_section_title))
     }
-    item("context_compression_section_card") {
-        SectionCard {
-            if (rows.isEmpty()) {
+    if (rows.isEmpty()) {
+        item("context_compression_section_empty") {
+            Box(modifier = Modifier.cardRow(isFirst = true, isLast = true)) {
                 Text(
                     text = stringResource(R.string.context_compression_empty_hint),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
                 )
-            } else {
-                rows.forEachIndexed { index, row ->
-                    if (index > 0) SectionDivider()
-                    val isGroup = groups.any { it.id == row.third }
-                    AgentLoopRow(
-                        title = row.first,
-                        subtitle = row.second,
-                        badge = if (isGroup) stringResource(R.string.agent_loop_section_group_badge) else null,
-                        onRemove = {
-                            if (isGroup) providerRepository.removeContextCompressionGroup(row.third)
-                            else providerRepository.removeContextCompressionEntry(row.third)
-                        },
-                        showDragHandle = false,
-                    )
+            }
+        }
+    } else {
+        itemsIndexed(rows, key = { _, key -> "compact:$key" }) { index, key ->
+            ReorderableItem(state = reorderState, key = "compact:$key") { _ ->
+                val group = if (key.startsWith("group:"))
+                    config.modelGroups.find { it.id == key.removePrefix("group:") } else null
+                val entry = if (key.startsWith("entry:"))
+                    config.modelEntries.find { it.id == key.removePrefix("entry:") } else null
+                val count = group?.memberEntryIds?.distinct()?.count { id -> config.modelEntries.any { it.id == id } } ?: 0
+                val subtitle = if (group != null) {
+                    if (count == 1) stringResource(R.string.agent_loop_models_model_count_singular)
+                    else stringResource(R.string.agent_loop_models_model_count_plural, count)
+                } else config.instances.find { it.id == entry?.providerInstanceId }?.label
+                Column {
+                    if (index != 0) SectionDividerInsetCard()
+                    Box(modifier = Modifier.cardRow(isFirst = index == 0, isLast = index == rows.lastIndex)) {
+                        AgentLoopRow(
+                            title = group?.name ?: entry?.model?.displayName.orEmpty(),
+                            subtitle = subtitle,
+                            badge = if (group != null) stringResource(R.string.agent_loop_section_group_badge) else null,
+                            onRemove = {
+                                if (group != null) providerRepository.removeContextCompressionGroup(group.id)
+                                else if (entry != null) providerRepository.removeContextCompressionEntry(entry.id)
+                            },
+                            dragHandleModifier = with(this@ReorderableItem) { Modifier.draggableHandle() },
+                        )
+                    }
                 }
             }
         }

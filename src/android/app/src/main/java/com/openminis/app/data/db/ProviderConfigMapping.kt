@@ -7,6 +7,7 @@ import com.openminis.app.data.model.ModelEntry
 import com.openminis.app.data.model.ModelGroup
 import com.openminis.app.data.model.ModelOverrides
 import com.openminis.app.data.model.ProviderConfig
+import com.openminis.app.data.model.contextCompressionTargets
 import com.openminis.app.data.model.ProviderCredential
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.model.ProviderType
@@ -47,6 +48,7 @@ object ProviderConfigMetaKeys {
     // [T-android-vision-group / GH#182] Vision Group pointer (per-device meta KV).
     const val VISION_GROUP_ID = "vision_group_id"
     const val JSON_SYNC_HASH = "json_sync_hash"
+    const val CONTEXT_COMPRESSION_ORDER = "context_compression_order"
 }
 
 /**
@@ -188,6 +190,14 @@ fun ProviderConfig.toSnapshot(
     }
 
     val metaRows = mutableListOf<ProviderConfigMetaEntity>()
+    val compactOrder = contextCompressionTargets().map { target ->
+        if (target.startsWith("entry:")) {
+            val id = target.removePrefix("entry:")
+            "entry:${idMap[id] ?: id}"
+        } else target
+    }.distinct()
+    metaRows.add(ProviderConfigMetaEntity(ProviderConfigMetaKeys.CONTEXT_COMPRESSION_ORDER,
+        jsonForBlobs.encodeToString(ListSerializer(String.serializer()), compactOrder)))
     defaultPrimaryGroupId?.let {
         metaRows.add(ProviderConfigMetaEntity(ProviderConfigMetaKeys.DEFAULT_PRIMARY_GROUP_ID, it))
     }
@@ -312,6 +322,9 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
         agentLoopGroupIds = groupLoopIds,
         contextCompressionModelEntryIds = compactEntryIds,
         contextCompressionGroupIds = compactGroupIds,
+        contextCompressionOrder = metaMap[ProviderConfigMetaKeys.CONTEXT_COMPRESSION_ORDER]?.let {
+            runCatching { jsonForBlobs.decodeFromString(stringListSerializer, it) }.getOrNull()
+        }.orEmpty(),
     )
 }
 

@@ -3263,41 +3263,29 @@ class ChatViewModel(
             throw IllegalStateException("No LLM provider available for compaction")
         }
 
-        var lastError: Throwable? = null
-        for ((provider, modelLabel) in providers) {
+        val (selected, summary) = tryCompactModels(
+            candidates = providers,
+            onFailure = { candidate, error ->
+                AppLogger.warning(TAG,
+                    "[Compact] ${candidate.first.model.displayName} failed; trying next configured model: ${error.message}")
+            },
+        ) { (provider, modelLabel) ->
             _compactProgress.value = _compactProgress.value?.copy(modelLabel = modelLabel)
             val contextWindow = provider.model.contextWindow ?: 128_000
             val estimatedInput = userMessage.length / 4
             val maxOut = maxOf(1024, minOf(8192, contextWindow - estimatedInput))
-            try {
-                val response = provider.sendMessage(
-                    messages = listOf(
-                        LLMMessage(role = LLMMessage.Role.USER, content = userMessage)
-                    ),
-                    systemPrompt = compactSummarySystemPrompt,
-                    maxTokens = maxOut,
-                    // null lets the provider/model use its default. GPT-5.x
-                    // rejects non-default temperature values.
-                    temperature = null,
-                    imageParts = emptyList(),
-                    tools = emptyList(),
-                    thinkingLevel = ThinkingLevel.OFF,
-                )
-                if (response.text.isNotBlank()) {
-                    compactModelsUsed.add(modelLabel)
-                    return response.text
-                }
-                lastError = IllegalStateException("Compaction model returned an empty response")
-            } catch (error: Throwable) {
-                if (error is CancellationException) throw error
-                lastError = error
-                AppLogger.warning(
-                    TAG,
-                    "[Compact] ${provider.model.displayName} failed; trying next configured model: ${error.message}",
-                )
-            }
+            provider.sendMessage(
+                messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = userMessage)),
+                systemPrompt = compactSummarySystemPrompt,
+                maxTokens = maxOut,
+                temperature = null,
+                imageParts = emptyList(),
+                tools = emptyList(),
+                thinkingLevel = ThinkingLevel.OFF,
+            ).text
         }
-        throw lastError ?: IllegalStateException("All context compression models failed")
+        compactModelsUsed.add(selected.second)
+        return summary
     }
 
     /**

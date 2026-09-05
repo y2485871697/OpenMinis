@@ -21,6 +21,9 @@ import com.openminis.app.data.model.ModelEntry
 import com.openminis.app.data.model.ModelOverrides
 import com.openminis.app.data.model.ModelGroup
 import com.openminis.app.data.model.ProviderConfig
+import com.openminis.app.data.model.contextCompressionTargets
+import com.openminis.app.data.model.contextCompressionCandidates
+import com.openminis.app.data.model.reorderedContextCompressionTargets
 import com.openminis.app.data.model.ProviderCredential
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.model.ProviderType
@@ -1389,8 +1392,10 @@ class ProviderRepository(private val context: Context) {
     fun setContextCompressionEntryIds(ids: List<String>): Unit = synchronized(configLock) {
         ensureConfigLoaded()
         val config = workingCopy()
+        config.contextCompressionOrder = config.contextCompressionTargets()
         config.contextCompressionModelEntryIds.clear()
         config.contextCompressionModelEntryIds.addAll(ids.distinct())
+        config.contextCompressionOrder = config.contextCompressionTargets()
         saveConfig(config)
     }
 
@@ -1398,8 +1403,18 @@ class ProviderRepository(private val context: Context) {
     fun setContextCompressionGroupIds(ids: List<String>): Unit = synchronized(configLock) {
         ensureConfigLoaded()
         val config = workingCopy()
+        config.contextCompressionOrder = config.contextCompressionTargets()
         config.contextCompressionGroupIds.clear()
         config.contextCompressionGroupIds.addAll(ids.distinct())
+        config.contextCompressionOrder = config.contextCompressionTargets()
+        saveConfig(config)
+    }
+
+    fun reorderContextCompressionTargets(newOrder: List<String>): Unit = synchronized(configLock) {
+        ensureConfigLoaded()
+        val config = workingCopy()
+        val validOrder = config.reorderedContextCompressionTargets(newOrder) ?: return@synchronized
+        config.contextCompressionOrder = validOrder
         saveConfig(config)
     }
 
@@ -1569,27 +1584,15 @@ class ProviderRepository(private val context: Context) {
 
     /**
      * Ordered, unique, currently usable models configured for context
-     * compression. Direct models are tried first, followed by group members.
+     * compression, in the same mixed priority order displayed by settings.
      */
     fun resolvedContextCompressionEntries(): List<ModelEntry> {
         val config = _config.value
-        val seen = mutableSetOf<String>()
-        val result = mutableListOf<ModelEntry>()
-
-        fun consider(id: String) {
-            val entry = config.modelEntries.find { it.id == id } ?: return
-            val instance = config.instances.find { it.id == entry.providerInstanceId } ?: return
-            if (!instance.isEnabled || entry.isHidden || !hasAnyCredential(instance)) return
-            if (seen.add(entry.id)) result.add(entry)
+        return config.contextCompressionCandidates().filter { entry ->
+            val instance = config.instances.find { it.id == entry.providerInstanceId }
+            instance != null && instance.isEnabled && instance.providerType.isUsable &&
+                !entry.isHidden && hasAnyCredential(instance)
         }
-
-        config.contextCompressionModelEntryIds.forEach(::consider)
-        for (groupId in config.contextCompressionGroupIds) {
-            config.modelGroups.find { it.id == groupId }
-                ?.memberEntryIds
-                ?.forEach(::consider)
-        }
-        return result
     }
     fun group(id: String): ModelGroup? =
         _config.value.modelGroups.find { it.id == id }
@@ -2901,6 +2904,7 @@ class ProviderRepository(private val context: Context) {
                 agentLoopGroupIds = mergedAgentGroups.toMutableList(),
                 contextCompressionModelEntryIds = mergedCompactEntries.toMutableList(),
                 contextCompressionGroupIds = mergedCompactGroups.toMutableList(),
+                contextCompressionOrder = (local.contextCompressionTargets() + remote.contextCompressionTargets()).distinct(),
             )
             saveConfig(merged)
             val after = orderedInstances.size
