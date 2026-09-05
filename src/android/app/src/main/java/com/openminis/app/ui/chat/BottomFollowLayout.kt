@@ -13,7 +13,7 @@ internal data class BottomFollowLayout(
     val afterPadding: Int,
     val visibleItems: List<Triple<Int, Int, Int>>,
 ) {
-    fun shouldPin(following: Boolean, userScrolledAway: Boolean): Boolean =
-        following && !userScrolledAway && !userInteracting && !scrolling &&
+    fun shouldPin(following: Boolean, userScrolledAway: Boolean, compacting: Boolean = false): Boolean =
+        (following || compacting) && !userScrolledAway && !userInteracting && !scrolling &&
             totalItems > 0 && (firstIndex != 0 || firstOffset != 0)
 }

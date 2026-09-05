@@ -1998,4 +1998,11 @@
     <string name="backup_local_verifying">Verifying saved backup...</string>
     <string name="backup_local_cache_cleaned">Temporary package removed (%1$s); the backup in your selected location was kept.</string>
     <string name="backup_local_failed">Could not save to the selected location. The in-app package was kept: %1$s</string>
+    <string name="minis_compact_summary_title">Compact Summary</string>
+    <string name="minis_compact_revert">Revert Compact</string>
+    <string name="minis_compact_revert_title">Revert this compact?</string>
+    <string name="minis_compact_revert_message">The summary will be discarded and the original messages will become active again. This may exceed the context limit. You can compact again from a message if needed.</string>
+    <string name="minis_compact_revert_confirm">Revert</string>
+    <string name="minis_compact_show_summary">Show full summary</string>
+    <string name="minis_compact_copy">Copy summary</string>
 </resources>

@@ -2111,7 +2111,29 @@ fun ChatScreen(
             wasStreaming = running
         }
     }
-    LaunchedEffect(listState, sessionId, isStreaming, followCompletedStream, userScrolledAway) {
+    // Compaction inserts/removes its own tail row outside the streaming lifecycle.
+    // Keep the same bottom-follow intent through the final divider's async layout.
+    LaunchedEffect(sessionId, viewModel) {
+        var previousRun: Long? = null
+        viewModel.compactProgress.collect { progress ->
+            val run = progress?.startedAtMs
+            if (run == previousRun) return@collect
+            val finished = previousRun != null && run == null
+            previousRun = run
+            if (run != null) {
+                pendingSearchMessageId = null
+                userScrolledAway = false
+                followCompletedStream = false
+                lastInterruptMs = 0L
+                if (!isUserDragging && !userDragAwaitingSettle) {
+                    tracedScrollToItem("COMPACT-START", 0, 0)
+                }
+            } else if (finished) {
+                followCompletedStream = !userScrolledAway && !isUserDragging && !userDragAwaitingSettle
+            }
+        }
+    }
+    LaunchedEffect(listState, sessionId, isStreaming, compactProgress != null, followCompletedStream, userScrolledAway) {
         val following = isStreaming || followCompletedStream
         snapshotFlow {
             val info = listState.layoutInfo
@@ -2128,7 +2150,7 @@ fun ChatScreen(
                 visibleItems = info.visibleItemsInfo.map { Triple(it.index, it.offset, it.size) },
             )
         }.distinctUntilChanged().collect { layout ->
-            if (layout.shouldPin(following, userScrolledAway)) {
+            if (layout.shouldPin(following, userScrolledAway, compacting = compactProgress != null)) {
                 listState.requestScrollToItem(0, 0)
             }
         }

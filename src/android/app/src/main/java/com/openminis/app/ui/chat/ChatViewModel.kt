@@ -1083,6 +1083,7 @@ class ChatViewModel(
         val callBudget: Int = MAX_COMPACT_LLM_CALLS,
         /** Seconds the whole run is allowed before it is cancelled. */
         val timeoutSeconds: Int = 0,
+        val modelLabel: String? = null,
     )
 
     private val _compactProgress = MutableStateFlow<CompactProgress?>(null)
@@ -2238,7 +2239,8 @@ class ChatViewModel(
                     return@launch
                 }
                 val compactModelLabel = compactModelsUsed.joinToString(" / ")
-                    .ifBlank { provider.model.displayName.ifBlank { provider.model.id } }
+                    .ifBlank { compactModelDisplayLabel(provider.model.displayName, provider.model.id,
+                        _providerName.value, provider.model.provider) }
                 val storedSummary = storeCompactSummary(summary, compactModelLabel)
 
                 val sid = realSessionId.ifEmpty { sessionId }
@@ -3235,24 +3237,31 @@ class ChatViewModel(
                     "所有事件使用过去时，描述已经讨论和已经完成的内容，不要写成仍在进行的目标或待办事项。"
             )
         }
-        val providers = buildList {
+        val providers = buildList<Pair<LLMProvider, String>> {
             for (entry in providerRepository.resolvedContextCompressionEntries()) {
                 val instance = providerRepository.instance(entry.providerInstanceId) ?: continue
                 val apiKey = providerRepository.usableApiKey(instance) ?: ""
                 runCatching {
                     ProviderFactory.create(instance, apiKey, entry.model, context)
-                }.getOrNull()?.let(::add)
+                }.getOrNull()?.let { candidate ->
+                    add(candidate to compactModelDisplayLabel(entry.model.displayName, entry.model.id,
+                        instance.label, entry.model.provider))
+                }
             }
             // Empty/unusable custom configuration must never break compaction.
             // The current chat model remains the final fallback.
-            currentProvider?.let(::add)
+            currentProvider?.let { candidate ->
+                add(candidate to compactModelDisplayLabel(candidate.model.displayName, candidate.model.id,
+                    _providerName.value, candidate.model.provider))
+            }
         }
         if (providers.isEmpty()) {
             throw IllegalStateException("No LLM provider available for compaction")
         }
 
         var lastError: Throwable? = null
-        for (provider in providers) {
+        for ((provider, modelLabel) in providers) {
+            _compactProgress.value = _compactProgress.value?.copy(modelLabel = modelLabel)
             val contextWindow = provider.model.contextWindow ?: 128_000
             val estimatedInput = userMessage.length / 4
             val maxOut = maxOf(1024, minOf(8192, contextWindow - estimatedInput))
@@ -3271,9 +3280,7 @@ class ChatViewModel(
                     thinkingLevel = ThinkingLevel.OFF,
                 )
                 if (response.text.isNotBlank()) {
-                    compactModelsUsed.add(
-                        provider.model.displayName.ifBlank { provider.model.id },
-                    )
+                    compactModelsUsed.add(modelLabel)
                     return response.text
                 }
                 lastError = IllegalStateException("Compaction model returned an empty response")

@@ -1775,4 +1775,11 @@
     <string name="backup_local_verifying">正在驗證已儲存的備份…</string>
     <string name="backup_local_cache_cleaned">已清理應用程式內的暫存檔案（%1$s），所選位置的備份已保留。</string>
     <string name="backup_local_failed">無法儲存至所選位置，應用程式內的備份套件已保留：%1$s</string>
+    <string name="minis_compact_summary_title">壓縮概覽</string>
+    <string name="minis_compact_revert">復原壓縮</string>
+    <string name="minis_compact_revert_title">復原此次壓縮？</string>
+    <string name="minis_compact_revert_message">摘要將被移除，原始訊息將重新納入上下文。這可能超過模型的上下文限制，必要時可從指定訊息重新壓縮。</string>
+    <string name="minis_compact_revert_confirm">復原</string>
+    <string name="minis_compact_show_summary">查看完整摘要</string>
+    <string name="minis_compact_copy">複製摘要</string>
 </resources>

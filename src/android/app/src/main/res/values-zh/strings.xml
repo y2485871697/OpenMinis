@@ -1825,4 +1825,11 @@
     <string name="backup_local_verifying">正在校验已保存的备份…</string>
     <string name="backup_local_cache_cleaned">已清理应用内临时文件（%1$s），所选位置的备份已保留。</string>
     <string name="backup_local_failed">无法保存到所选位置，应用内备份包已保留：%1$s</string>
+    <string name="minis_compact_summary_title">压缩概览</string>
+    <string name="minis_compact_revert">撤销压缩</string>
+    <string name="minis_compact_revert_title">撤销此次压缩？</string>
+    <string name="minis_compact_revert_message">摘要将被移除，原始消息将重新纳入上下文。这可能超过模型的上下文限制，必要时可从指定消息重新压缩。</string>
+    <string name="minis_compact_revert_confirm">撤销</string>
+    <string name="minis_compact_show_summary">查看完整摘要</string>
+    <string name="minis_compact_copy">复制摘要</string>
 </resources>
