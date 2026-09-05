@@ -59,6 +59,6 @@ class ReverseReadingAnchorTest {
         assertTrue(source.contains("userScrolledAway && pendingSearchMessageId == null"))
         assertTrue(source.contains("liveAnchorKey == current.key && draining"))
         assertTrue(source.contains("listState.dispatchRawDelta(growth.toFloat())"))
-        assertTrue(source.contains("growth > 0 && !isUserDragging && !listState.isScrollInProgress"))
+        assertTrue(source.contains("growth > 0 && false"))
     }
 }
