@@ -369,7 +369,7 @@ private fun MdText(
     // overlay a fade-in alpha on each freshly-appended word range. Off by
     // default (LocalAppendOnlyFade=false) so cold-loaded history and
     // completed messages render fully opaque without per-frame work.
-    val fadeEnabled = LocalAppendOnlyFade.current
+    val fadeEnabled = LocalAppendOnlyFade.current && LocalStreamingMarkdown.current
     val fadeController = if (fadeEnabled) rememberFadeController() else null
     if (fadeController != null) {
         // Ingest synchronously during composition (not in a LaunchedEffect):

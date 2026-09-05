@@ -4331,6 +4331,9 @@ fun ChatScreen(
                                 BoundsTrackedBlock(
                                     messageId = item.messageId,
                                     slotKey = "mdblock:${item.parentBlockId}:${item.blockIndex}",
+                                    // A recycled history row must appear at its measured size,
+                                    // not animate from the async parser's initially empty body.
+                                    animateSize = false,
                                     markdown = liveMarkdown,
                                 ) {
                                     LargeContentGuard(
@@ -4505,6 +4508,7 @@ fun ChatScreen(
                             is FlatChatItem.AssistantLegacyContent -> BoundsTrackedBlock(
                                 messageId = item.messageId,
                                 slotKey = "legacy",
+                                animateSize = false,
                                 markdown = item.messageMarkdown,
                             ) {
                                 LargeContentGuard(
