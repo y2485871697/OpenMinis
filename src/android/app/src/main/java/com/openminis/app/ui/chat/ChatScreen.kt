@@ -3997,6 +3997,7 @@ fun ChatScreen(
                                 kotlin.math.abs(available.y) > 0.5f &&
                                 viewModel.isStreaming.value
                             ) {
+                                manualDragLeftBottom = true
                                 userScrolledAway = true
                                 followCompletedStream = false
                                 lastInterruptMs = System.currentTimeMillis()
@@ -4987,6 +4988,7 @@ fun ChatScreen(
                             // false, the auto-reset never fires, and the FAB was
                             // stuck visible. The user tapped "go to bottom" — the
                             // intent is unambiguous, so reset directly.
+                            manualDragLeftBottom = false
                             userScrolledAway = false
                             followCompletedStream = true
                             // [T-android-scrollbtn-turn-walk] Jumping to the
