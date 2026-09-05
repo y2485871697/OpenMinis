@@ -2709,6 +2709,7 @@ fun ChatScreen(
                                     )
                                     Text(
                                         text = modelName.ifEmpty { groupNameDisplay.ifEmpty { providerName } },
+                                        modifier = Modifier.weight(1f, fill = false),
                                         fontSize = 12.sp,
                                         lineHeight = 14.sp,
                                         fontWeight = FontWeight.Medium,
