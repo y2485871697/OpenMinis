@@ -14,6 +14,7 @@ import com.openminis.app.data.model.LLMStreamChunk
 import com.openminis.app.data.model.LLMUsage
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.provider.LLMProvider
+import com.openminis.app.provider.stream.SseEventReader
 import com.openminis.app.provider.safeOptString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
@@ -126,11 +127,8 @@ class GeminiProvider(
         try {
             var started = false
             var lastFinishReason: String? = null
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                val l = line ?: continue
-                if (!l.startsWith("data: ")) continue
-                val payload = l.removePrefix("data: ")
+                for (sseEvent in SseEventReader(reader)) {
+                val payload = sseEvent.data
 
                 val json = try { JSONObject(payload) } catch (_: Exception) { continue }
 
