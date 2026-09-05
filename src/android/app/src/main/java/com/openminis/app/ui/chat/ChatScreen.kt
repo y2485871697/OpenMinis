@@ -3773,7 +3773,7 @@ fun ChatScreen(
                              tracedScrollToItem("flatItems/stream-end-repin", 0, 0)
                          }
                          return@LaunchedEffect
-                     }                    // Pin once per new trailing tool/typing row, key-deduped,
+                     }`r`n                     // Pin once per new trailing tool/typing row, key-deduped,
                     // not on every flatten publish, so streaming tool-arg
                     // ticks don't fight the user. flatItems is oldest-first
                     // (rendered via asReversed()), so the newest row is at
