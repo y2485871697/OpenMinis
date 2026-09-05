@@ -593,7 +593,11 @@ private fun StreamingMarkdownTextBody(
     isStreaming: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val blocks = rememberParsedMarkdown(content, isStreaming)
+    val parsedBlocks = rememberParsedMarkdown(content, isStreaming)
+    val liveTail = isOpenMarkdownTail(content, isStreaming)
+    val blocks = remember(parsedBlocks, liveTail) {
+        markdownBlocksForPresentation(parsedBlocks, liveTail)
+    }
 
     ShardSubIndexScope {
         Column(modifier = modifier) {
@@ -854,7 +858,11 @@ private fun MarkdownBlockBody(
     isStreaming: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val blocks = rememberParsedMarkdown(rawText, isStreaming)
+    val parsedBlocks = rememberParsedMarkdown(rawText, isStreaming)
+    val liveTail = isOpenMarkdownTail(rawText, isStreaming)
+    val blocks = remember(parsedBlocks, liveTail) {
+        markdownBlocksForPresentation(parsedBlocks, liveTail)
+    }
     Column(modifier = modifier) {
         androidx.compose.runtime.CompositionLocalProvider(LocalStreamingMarkdown provides isStreaming) {
             blocks.forEach { RenderBlock(it) }
@@ -1514,6 +1522,57 @@ private fun parseTable(lines: List<String>): Pair<List<String>, List<List<String
 }
 
 // ─── Block renderers ────────────────────────────────────────────────────────
+
+private fun isOpenMarkdownTail(content: String, isStreaming: Boolean): Boolean =
+    isStreaming && !content.endsWith('\n') && !content.endsWith('\r')
+
+/** Display-only: never store a provisional bullet in the canonical AST cache. */
+private fun markdownBlocksForPresentation(blocks: List<MdBlock>, isStreamingTail: Boolean): List<MdBlock> {
+    if (!isStreamingTail) return blocks
+    val block = blocks.lastOrNull() ?: return blocks
+    return when (block) {
+        is MdBlock.Paragraph -> {
+            val lineStart = block.raw.lastIndexOf('\n') + 1
+            val tail = block.raw.substring(lineStart).trimStart()
+            if (tail != "-") return blocks
+            val precedingText = block.raw.substring(0, lineStart).trimEnd('\r', '\n')
+            val result = blocks.dropLast(1).toMutableList()
+            if (precedingText.isNotEmpty()) result.add(MdBlock.Paragraph(precedingText))
+            // Match the final list's structure and spacing from its first token.
+            // Do not add a second list container below existing bullet items.
+            val previous = result.lastOrNull()
+            if (previous is MdBlock.UnorderedList) {
+                result[result.lastIndex] = MdBlock.UnorderedList(
+                    previous.raw + "\n" + tail, previous.items + ListItem(""),
+                )
+            } else {
+                result.add(MdBlock.UnorderedList(tail, listOf(ListItem(""))))
+            }
+            result
+        }
+        is MdBlock.BlockQuote -> {
+            val inner = markdownBlocksForPresentation(block.innerBlocks, true)
+            if (inner === block.innerBlocks) blocks
+            else blocks.dropLast(1) + MdBlock.BlockQuote(block.raw, inner)
+        }
+        // Code, tables, math and already recognized lists keep their exact AST.
+        else -> blocks
+    }
+}
+
+@androidx.annotation.VisibleForTesting
+internal suspend fun markdownBlockPresentationForTest(
+    content: String,
+    isStreaming: Boolean,
+): List<Pair<String, String>> {
+    val blocks = parseMarkdownBlocks(content)
+    fun describe(block: MdBlock): List<Pair<String, String>> = when (block) {
+        is MdBlock.BlockQuote -> block.innerBlocks.flatMap { describe(it) }
+        else -> listOf(block.javaClass.simpleName to block.raw)
+    }
+    return markdownBlocksForPresentation(blocks, isOpenMarkdownTail(content, isStreaming))
+        .flatMap { describe(it) }
+}
 
 @Composable
 private fun RenderBlock(block: MdBlock) {
