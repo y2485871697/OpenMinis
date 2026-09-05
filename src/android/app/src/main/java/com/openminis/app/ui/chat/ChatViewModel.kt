@@ -1084,6 +1084,7 @@ class ChatViewModel(
         /** Seconds the whole run is allowed before it is cancelled. */
         val timeoutSeconds: Int = 0,
         val modelLabel: String? = null,
+        val userInitiated: Boolean = true,
     )
 
     private val _compactProgress = MutableStateFlow<CompactProgress?>(null)
@@ -2200,6 +2201,7 @@ class ChatViewModel(
             callsIssued = 0,
             callBudget = MAX_COMPACT_LLM_CALLS,
             timeoutSeconds = (timeoutMs / 1000L).toInt(),
+            userInitiated = !allowDuringProcessing,
         )
         AppLogger.info(
             TAG,
