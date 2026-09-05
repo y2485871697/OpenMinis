@@ -3699,7 +3699,7 @@ fun ChatScreen(
                         val growth = if (liveAnchorKey == current.key && draining)
                             current.growthSince(previous) else 0
                         previous = current
-                        if (growth > 0 && false) {
+                        if (growth > 0) {
                             // This is geometry compensation, not a new scroll intent.
                             // Raw delta keeps the ongoing drag/fling alive and avoids
                             // cancelling it with scrollToItem/requestScrollToItem.
