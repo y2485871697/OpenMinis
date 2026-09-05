@@ -483,15 +483,12 @@ private fun sameStreamingLayout(
         if (oldDelta.isAwaitingModelResponse != newDelta.isAwaitingModelResponse) return false
         if (oldDelta.content.isEmpty() != newDelta.content.isEmpty()) return false
         if (oldDelta.contentStructureKey != newDelta.contentStructureKey) return false
+        // Tool blocks are append-only within a streamed assistant turn. Status and
+        // argument/content changes are rendered by the row's side-channel subscriber;
+        // only a new/removed block can change the LazyColumn structure. Scanning all
+        // 900+ historical tool blocks on every 50ms snapshot was a measurable CPU
+        // and allocation multiplier on long agent sessions.
         if (oldDelta.toolBlocks.size != newDelta.toolBlocks.size) return false
-        for (index in oldDelta.toolBlocks.indices) {
-            val oldBlock = oldDelta.toolBlocks[index]
-            val newBlock = newDelta.toolBlocks[index]
-            if (oldBlock.id != newBlock.id ||
-                oldBlock.kind != newBlock.kind ||
-                oldBlock.toolStatus != newBlock.toolStatus
-            ) return false
-        }
     }
     return true
 }
