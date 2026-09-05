@@ -3670,9 +3670,13 @@ fun ChatScreen(
                 // Preserve the text under the viewport while the same reverse-layout
                 // row grows. A stable row key alone only preserves its bottom edge.
                 val readingLeadingRows = androidx.compose.runtime.rememberUpdatedState(searchLeadingRows)
+                // [T-android-stream-growth-glitch] Measures the anchored row's
+                // growth during the layout pass and pre-pays the compensation
+                // visually (see ReadingShiftBridge), so the one-frame window
+                // between a streamed height change and the dispatchRawDelta
+                // correction below never renders as a visible jump.
+                val streamShiftBridge = remember(listState) { ReadingShiftBridge() }
                 LaunchedEffect(listState, sessionId) {
-                    var previous: ReverseReadingAnchor? = null
-                    var liveAnchorKey: Any? = null
                     var lastLogMs = 0L
                     snapshotFlow {
                         val info = listState.layoutInfo
@@ -3694,31 +3698,33 @@ fun ChatScreen(
                                 info.beforeContentPadding, info.afterContentPadding)
                         }
                         Triple(current, userScrolledAway && pendingSearchMessageId == null, live)
-                    }.distinctUntilChanged().collect { (current, reading, live) ->
+                    }.distinctUntilChanged().collect { (current, reading, _) ->
                         if (!reading || current == null) {
-                            previous = null
-                            liveAnchorKey = null
+                            streamShiftBridge.reset()
                             return@collect
                         }
-                        if (current.key != previous?.key) liveAnchorKey = null
-                        if (live) liveAnchorKey = current.key
-                        val now = System.currentTimeMillis()
-                        val draining = viewModel.isStreaming.value ||
-                            (lastStreamEndMs > 0L && now - lastStreamEndMs in 0..STREAM_END_ARM_GRACE_MS)
-                        val growth = if (liveAnchorKey == current.key && draining)
-                            current.growthSince(previous) else 0
-                        previous = current
-                        if (growth > 0) {
-                            // This is geometry compensation, not a new scroll intent.
-                            // Coalesce geometry changes until the next frame. Streaming
-                            // markdown commonly publishes several layout changes in one
-                            // frame; dispatching each raw delta immediately causes a
-                            // visible oscillation while Compose is still remeasuring.
-                            withFrameNanos { }
-                            val consumed = listState.dispatchRawDelta(growth.toFloat())
+                        // This is geometry compensation, not a new scroll intent.
+                        // Coalesce geometry changes until the next frame. Streaming
+                        // markdown commonly publishes several layout changes in one
+                        // frame; dispatching each raw delta immediately causes a
+                        // visible oscillation while Compose is still remeasuring.
+                        //
+                        // The amount dispatched is whatever the measure-phase
+                        // bridge is still owed — it has been pre-paying this
+                        // shift visually since the frame that grew the row, so
+                        // taking the correction from it keeps scroll and pixels
+                        // in exact agreement (single authority, no double-apply).
+                        // The bridge only accumulates while the anchor row is the
+                        // live streaming row and the drain window is open, so an
+                        // owed>0 emission always follows a real geometry change.
+                        withFrameNanos { }
+                        val owed = streamShiftBridge.takePending()
+                        if (owed > 0) {
+                            val now = System.currentTimeMillis()
+                            val consumed = listState.dispatchRawDelta(owed.toFloat())
                             if (now - lastLogMs >= 500L) {
                                 lastLogMs = now
-                                AppLogger.debug("ScrollReadingAnchor", "growth=$growth consumed=$consumed key=${current.key}")
+                                AppLogger.debug("ScrollReadingAnchor", "growth=$owed consumed=$consumed key=${current.key}")
                             }
                         }
                     }
@@ -4040,6 +4046,35 @@ fun ChatScreen(
                         bottom = if (bottomReserve == 0.dp) 12.dp else bottomReserve,
                     ),
                     modifier = Modifier
+                        // [T-android-stream-growth-glitch] Outermost so the
+                        // visual pre-payment wraps the whole list measure: the
+                        // bridge reads the freshly measured geometry, cancels
+                        // this frame's anchored-row growth shift via placement,
+                        // and the reading-anchor collector below converts the
+                        // same amount into a real scroll delta next frame.
+                        .readingShiftBridge {
+                            // withoutReadObservation: layoutInfo is written by
+                            // the inner measure this block invokes; an observed
+                            // read here would re-invalidate this node every tick.
+                            val firstInfo = androidx.compose.runtime.snapshots.Snapshot.withoutReadObservation {
+                                listState.layoutInfo.visibleItemsInfo.firstOrNull()
+                            }
+                            streamShiftBridge.onAnchorObserved(
+                                key = firstInfo?.key,
+                                size = firstInfo?.size ?: 0,
+                                live = firstInfo != null &&
+                                    chatRowIsLive(
+                                        flatItems,
+                                        firstInfo.index,
+                                        firstInfo.key,
+                                        readingLeadingRows.value,
+                                    ),
+                                reading = userScrolledAway && pendingSearchMessageId == null,
+                                draining = viewModel.isStreaming.value ||
+                                    (lastStreamEndMs > 0L &&
+                                        System.currentTimeMillis() - lastStreamEndMs in 0..STREAM_END_ARM_GRACE_MS),
+                            )
+                        }
                         .fillMaxWidth()
                         .nestedScroll(userScrollPauseConnection)
                         // [T-android-chat-max-content-width] Cap the reading
