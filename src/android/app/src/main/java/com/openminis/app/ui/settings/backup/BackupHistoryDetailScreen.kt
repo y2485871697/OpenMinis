@@ -168,7 +168,8 @@ fun BackupHistoryDetailScreen(
                         // Only when the saved destination still exists — a row
                         // for a server the user has since removed has nowhere
                         // to go.
-                        onClick = onOpenDestination?.let { open -> { open(d.name) } },
+                        onClick = if (d.kind == "local") null
+                            else onOpenDestination?.let { open -> { open(d.name) } },
                     )
                 }
             }
@@ -415,6 +416,7 @@ private fun RowDivider(inset: androidx.compose.ui.unit.Dp) {
  * as they did before rather than showing an empty caption.
  */
 private fun destinationSubtitle(d: BackupHistory.DestinationOutcome): String? {
+    if (d.kind == "local") return d.path
     val kind = d.kind?.trim()?.uppercase()?.takeIf { it.isNotEmpty() }
     val path = d.path?.trim()?.takeIf { it.isNotEmpty() }
     return when {

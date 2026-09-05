@@ -1766,4 +1766,13 @@
     <string name="compact_progress_split">正在壓縮… %1$d 秒 · 分段摘要中（%2$d/%3$d）</string>
     <string name="appearance_section_provider_balance">提供商餘額</string>
     <string name="appearance_show_provider_balance">顯示提供商餘額</string>
+    <string name="backup_storage_target">備份位置</string>
+    <string name="backup_storage_local">本機儲存空間</string>
+    <string name="backup_storage_server">伺服器</string>
+    <string name="backup_save_local">備份到本機儲存空間</string>
+    <string name="backup_local_writing">正在寫入本機備份：%1$d%%</string>
+    <string name="backup_local_saved">備份已儲存至所選位置並通過完整性驗證。</string>
+    <string name="backup_local_verifying">正在驗證已儲存的備份…</string>
+    <string name="backup_local_cache_cleaned">已清理應用程式內的暫存檔案（%1$s），所選位置的備份已保留。</string>
+    <string name="backup_local_failed">無法儲存至所選位置，應用程式內的備份套件已保留：%1$s</string>
 </resources>

@@ -1816,4 +1816,13 @@
     <string name="message_branch_failed">无法创建分支</string>
     <string name="appearance_section_provider_balance">提供商余额</string>
     <string name="appearance_show_provider_balance">显示提供商余额</string>
+    <string name="backup_storage_target">备份位置</string>
+    <string name="backup_storage_local">本地存储</string>
+    <string name="backup_storage_server">服务器</string>
+    <string name="backup_save_local">备份到本地存储</string>
+    <string name="backup_local_writing">正在写入本地备份：%1$d%%</string>
+    <string name="backup_local_saved">备份已保存到所选位置并通过完整性校验。</string>
+    <string name="backup_local_verifying">正在校验已保存的备份…</string>
+    <string name="backup_local_cache_cleaned">已清理应用内临时文件（%1$s），所选位置的备份已保留。</string>
+    <string name="backup_local_failed">无法保存到所选位置，应用内备份包已保留：%1$s</string>
 </resources>

@@ -227,6 +227,12 @@ private fun BackupTab(
     val destinations by vm.destinations.collectAsState()
     val historyRecords by vm.historyRecords.collectAsState()
     val lastResult by vm.lastResult.collectAsState()
+    var localBackup by rememberSaveable { mutableStateOf(!vm.hasDestination) }
+    val createLocalBackup = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        if (uri != null) vm.startExport(passphrase.takeIf { encrypt }, localDestination = uri)
+    }
 
     // Re-read destinations every time this tab appears: the user may have just
     // added one via "Manage Destinations…" and navigated back, and a stale
@@ -366,12 +372,30 @@ private fun BackupTab(
     // Destinations…" button, so the backup screen never showed WHETHER a
     // destination existed — which is how "back up with none configured"
     // stayed invisible.
-    DestinationsSection(
-        destinations = destinations,
-        enabled = !running,
-        onManage = onManageDestinations,
-        onToggle = vm::setDestinationEnabled,
-    )
+    SettingsSection(header = stringResource(R.string.backup_storage_target)) {
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(16.dp)) {
+            SegmentedButton(
+                selected = localBackup,
+                onClick = { localBackup = true },
+                enabled = !running,
+                shape = SegmentedButtonDefaults.itemShape(0, 2),
+            ) { Text(stringResource(R.string.backup_storage_local)) }
+            SegmentedButton(
+                selected = !localBackup,
+                onClick = { localBackup = false },
+                enabled = !running,
+                shape = SegmentedButtonDefaults.itemShape(1, 2),
+            ) { Text(stringResource(R.string.backup_storage_server)) }
+        }
+    }
+    if (!localBackup) {
+        DestinationsSection(
+            destinations = destinations,
+            enabled = !running,
+            onManage = onManageDestinations,
+            onToggle = vm::setDestinationEnabled,
+        )
+    }
 
     // -- Action --
     Column(Modifier.padding(16.dp)) {
@@ -389,7 +413,13 @@ private fun BackupTab(
         MinisButton(
             onClick = {
                 if (running) vm.stopExport()
-                else vm.startExport(passphrase.takeIf { encrypt })
+                else if (localBackup) {
+                    try {
+                        createLocalBackup.launch("OpenMinis-${System.currentTimeMillis()}.minisbak")
+                    } catch (e: Exception) {
+                        vm.reportLocalPickerError(e.message)
+                    }
+                } else vm.startExport(passphrase.takeIf { encrypt })
             },
             // The start-time requirements gate STARTING only. Applying them
             // while running would disable the button mid-run and leave no way
@@ -399,7 +429,7 @@ private fun BackupTab(
             // dies with the app it protects — that is not a backup, so the
             // button refuses rather than producing one (iOS parity).
             enabled = running || (
-                selected.isNotEmpty() && passphraseValid && destinations.isNotEmpty()
+                selected.isNotEmpty() && passphraseValid && (localBackup || destinations.any { it.enabled })
                 ),
             colors = if (running) {
                 androidx.compose.material3.ButtonDefaults.buttonColors(
@@ -415,9 +445,11 @@ private fun BackupTab(
             // on the red container rather than the same cloud-upload icon in a
             // different colour.
             PrimaryActionContent(
-                icon = if (running) Icons.Outlined.Stop else Icons.Outlined.CloudUpload,
+                icon = if (running) Icons.Outlined.Stop
+                    else if (localBackup) Icons.Outlined.Storage else Icons.Outlined.CloudUpload,
                 label = stringResource(
-                    if (running) R.string.backup_stop else R.string.backup_start,
+                    if (running) R.string.backup_stop
+                    else if (localBackup) R.string.backup_save_local else R.string.backup_start,
                 ),
                 // The backup button reports progress in Backup History below,
                 // not in the control, so it keeps its icon while running.
@@ -439,7 +471,7 @@ private fun BackupTab(
         // already selected (same ordering and rationale as iOS).
         if (!running) {
             val hint = when {
-                destinations.isEmpty() -> stringResource(R.string.backup_needs_destination)
+                !localBackup && destinations.none { it.enabled } -> stringResource(R.string.backup_needs_destination)
                 selected.isEmpty() -> stringResource(R.string.backup_needs_category)
                 encrypt && passphrase.isEmpty() -> stringResource(R.string.backup_needs_passphrase)
                 else -> null
@@ -1284,6 +1316,9 @@ private fun ResultDestinationRow(
 /** Where the package ended up, in words. */
 @Composable
 private fun backupResultFooter(r: BackupViewModel.RunResult): String {
+    if (r.destinations.any { it.kind == "local" && it.succeeded }) {
+        return stringResource(R.string.backup_local_saved)
+    }
     if (r.destinations.isEmpty()) return stringResource(R.string.backup_result_local_only)
     val ok = r.destinations.count { it.succeeded }
     // Once every destination is verified the local package is deleted, so the

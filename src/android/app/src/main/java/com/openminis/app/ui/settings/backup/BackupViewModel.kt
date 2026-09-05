@@ -226,26 +226,32 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
      * encrypted" means. Matches iOS 08904c7b1; the two sides must agree or
      * packages stop being interchangeable.
      */
-    fun startExport(passphrase: String?) {
-        if (_isRunning.value) return
+    fun startExport(passphrase: String?, localDestination: Uri? = null) {
+        if (_isRunning.value) { discardUnusedLocalDocument(localDestination); return }
         val cats = _selected.value
-        if (cats.isEmpty()) { _errorText.value = "Choose at least one thing to include."; return }
+        if (cats.isEmpty()) {
+            discardUnusedLocalDocument(localDestination)
+            _errorText.value = "Choose at least one thing to include."
+            return
+        }
         // [T-android-backup-destination-gate] Refuse to produce a package that
         // can only land in our own sandbox. Re-read here rather than trusting
         // the cached list: the user may have removed the last destination in
         // another screen since this one was composed.
         refreshDestinations()
-        if (!hasDestination) {
+        if (localDestination == null && !hasDestination) {
             _errorText.value = getApplication<Application>()
                 .getString(com.openminis.app.R.string.backup_needs_destination)
             return
         }
         val encrypting = _encrypt.value
         if (encrypting && passphrase.isNullOrEmpty()) {
+            discardUnusedLocalDocument(localDestination)
             _errorText.value = "Set a passphrase to encrypt this backup."
             return
         }
         _isRunning.value = true
+        _errorText.value = null
         _lastResult.value = null
         _statusText.value = "Starting…"
         _exportReady.value = null
@@ -266,6 +272,8 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         fun note(line: String, problem: Boolean = false) {
             log.add(BackupHistory.LogEntry(System.currentTimeMillis(), line, problem))
         }
+        var localDelivered = false
+        var localDisplayName: String? = null
         exportJob = viewModelScope.launch {
             try {
                 val summary = withContext(Dispatchers.IO) {
@@ -294,10 +302,53 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
                 // Share / Save it, and re-run delivery later. Mirrors iOS's
                 // "package is ready even if a destination failed" behaviour.
                 val outcomes = withContext(Dispatchers.IO) {
-                    deliverToRemotes(summary.packageFile, summary.backupId) { line ->
-                        _statusText.value = line
-                        note(line)
-                        publishRunning(record, log)
+                    if (localDestination != null) {
+                        val app = getApplication<Application>()
+                        val resolver = app.contentResolver
+                        val destinationName = app.getString(com.openminis.app.R.string.backup_storage_local)
+                        try {
+                            runCatching {
+                                resolver.takePersistableUriPermission(localDestination,
+                                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                        android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                            }
+                            localDisplayName = runCatching {
+                                resolver.query(localDestination,
+                                    arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                                    ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+                            }.getOrNull()
+                            com.openminis.app.backup.copyBackupVerified(
+                                source = summary.packageFile,
+                                openOutput = { resolver.openOutputStream(localDestination, "wt") },
+                                openVerificationInput = {
+                                    val line = app.getString(com.openminis.app.R.string.backup_local_verifying)
+                                    _statusText.value = line
+                                    note(line)
+                                    publishRunning(record, log)
+                                    resolver.openInputStream(localDestination)
+                                },
+                            ) { bytes, total ->
+                                val line = app.getString(com.openminis.app.R.string.backup_local_writing,
+                                    (bytes * 100 / total).toInt())
+                                _statusText.value = line
+                                note(line)
+                                publishRunning(record, log)
+                            }
+                            localDelivered = true
+                            listOf(BackupHistory.DestinationOutcome(destinationName, succeeded = true,
+                                kind = "local", path = localDestination.toString()))
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            listOf(BackupHistory.DestinationOutcome(destinationName, succeeded = false,
+                                detail = e.message, kind = "local", path = localDestination.toString()))
+                        }
+                    } else {
+                        deliverToRemotes(summary.packageFile, summary.backupId) { line ->
+                            _statusText.value = line
+                            note(line)
+                            publishRunning(record, log)
+                        }
                     }
                 }
                 outcomes.forEach {
@@ -325,7 +376,8 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
                         // also lands in the record, because "did it clean up
                         // after itself?" is asked long after the card is gone.
                         val msg = getApplication<Application>().getString(
-                            com.openminis.app.R.string.backup_local_removed,
+                            if (localDestination != null) com.openminis.app.R.string.backup_local_cache_cleaned
+                            else com.openminis.app.R.string.backup_local_removed,
                             humanBytesPlain(freed),
                         )
                         AppLogger.info(TAG, "[Backup] $msg")
@@ -351,8 +403,10 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
                 )
                 val failed = outcomes.filterNot { it.succeeded }
                 if (failed.isNotEmpty()) {
-                    _errorText.value = "Saved locally, but delivery failed for: " +
-                        failed.joinToString("; ") { "${it.name}: ${it.detail ?: "failed"}" }
+                    val detail = failed.joinToString("; ") { "${it.name}: ${it.detail ?: "failed"}" }
+                    _errorText.value = if (localDestination != null) {
+                        getApplication<Application>().getString(com.openminis.app.R.string.backup_local_failed, detail)
+                    } else "Saved locally, but delivery failed for: " + detail
                 }
                 record = record.copy(
                     backupId = summary.backupId,
@@ -371,7 +425,7 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
                     skippedEntries = summary.skippedPaths.map {
                         BackupHistory.SkippedEntry(it.path, it.size)
                     },
-                    packageName = summary.packageFile.name,
+                    packageName = localDisplayName ?: summary.packageFile.name,
                     destinations = outcomes,
                     log = log.toList(),
                 )
@@ -403,6 +457,11 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
                 )
                 _statusText.value = null
             } finally {
+                if (localDestination != null && !localDelivered) {
+                    withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
+                        deleteLocalDocument(localDestination)
+                    }
+                }
                 exportJob = null
                 history.upsert(record)
                 _historyRecords.value = history.records()
@@ -452,12 +511,15 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
+                record.destinations.filter { it.succeeded && it.kind == "local" }.forEach { outcome ->
+                    outcome.path?.let { deleteLocalDocument(Uri.parse(it)) }
+                }
                 runCatching {
                     val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
                     store.syncToRclone()
                     val uploader =
                         com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
-                    for (outcome in record.destinations.filter { it.succeeded }) {
+                    for (outcome in record.destinations.filter { it.succeeded && it.kind != "local" }) {
                         val remote = store.remotes.firstOrNull { it.name == outcome.name }
                             ?: continue
                         runCatching { uploader.deletePackage(remote, name) }
@@ -524,6 +586,28 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         return outcomes
+    }
+
+    fun reportLocalPickerError(message: String?) {
+        _errorText.value = message ?: "Cannot open the system file picker."
+    }
+
+    private fun discardUnusedLocalDocument(uri: Uri?) {
+        if (uri != null) viewModelScope.launch(Dispatchers.IO) { deleteLocalDocument(uri) }
+    }
+
+    private fun deleteLocalDocument(uri: Uri) {
+        val resolver = getApplication<Application>().contentResolver
+        runCatching {
+            check(android.provider.DocumentsContract.deleteDocument(resolver, uri)) {
+                "Document provider refused deletion"
+            }
+            runCatching {
+                resolver.releasePersistableUriPermission(uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            }
+        }.onFailure { AppLogger.error(TAG, "[Backup] local document cleanup failed: ${it.message}") }
     }
 
     // -- Restore state ----------------------------------------------------

@@ -1989,4 +1989,13 @@
     <string name="message_branch_failed">Could not create branch</string>
     <string name="appearance_section_provider_balance">Provider balance</string>
     <string name="appearance_show_provider_balance">Show provider balance</string>
+    <string name="backup_storage_target">Backup destination</string>
+    <string name="backup_storage_local">Local storage</string>
+    <string name="backup_storage_server">Server</string>
+    <string name="backup_save_local">Back up to local storage</string>
+    <string name="backup_local_writing">Writing local backup: %1$d%%</string>
+    <string name="backup_local_saved">Backup saved to the selected location and verified.</string>
+    <string name="backup_local_verifying">Verifying saved backup...</string>
+    <string name="backup_local_cache_cleaned">Temporary package removed (%1$s); the backup in your selected location was kept.</string>
+    <string name="backup_local_failed">Could not save to the selected location. The in-app package was kept: %1$s</string>
 </resources>
