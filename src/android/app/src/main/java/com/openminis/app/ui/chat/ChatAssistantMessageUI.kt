@@ -85,6 +85,7 @@ import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -1034,11 +1035,11 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
             val scrollState = rememberScrollState()
             // [T-thinking-render-perf-android] Render only the tail window so
             // Compose lays out at most `thinkingWindowSize` chars. `remember`
-            // keyed on the length recomputes the substring on each token, but
+            // keyed on the content also handles same-length corrections;
             // the cost is O(window) not O(total). Snap the cut to the next
             // newline (within 200 chars) so we don't start mid-line.
             val isTruncated = charCount > thinkingWindowSize
-            val displayContent = remember(charCount) {
+            val displayContent = remember(block.content) {
                 if (isTruncated) {
                     val full = block.content
                     val start = charCount - thinkingWindowSize
@@ -1049,46 +1050,41 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
                     block.content
                 }
             }
-            // [T-android-thinking-inner-scroll] Pause auto-follow once the user
-            // scrolls away from the bottom; resume it when they return. iOS
-            // pulls the user back unconditionally — but that fights every
-            // touch on Compose's smaller pause-threshold scroller, so we
-            // honor the user's drag the way the outer chat list does.
             var userScrolledAway by remember(block.id) { mutableStateOf(false) }
+            var userDragging by remember(block.id) { mutableStateOf(false) }
+            var userScrollPending by remember(block.id) { mutableStateOf(false) }
             LaunchedEffect(scrollState, block.id) {
-                snapshotFlow {
-                    Triple(
-                        scrollState.value,
-                        scrollState.maxValue,
-                        scrollState.isScrollInProgress,
-                    )
-                }.collect { (v, max, dragging) ->
-                    // A nonzero gap from the bottom while the user is actively
-                    // dragging counts as "they took control". We don't flip
-                    // back until the gap closes — gives them room to scroll
-                    // up briefly without ping-ponging.
-                    val gap = (max - v).coerceAtLeast(0)
-                    when {
-                        dragging && gap > 4 -> userScrolledAway = true
-                        gap <= 4 -> userScrolledAway = false
+                scrollState.interactionSource.interactions.collect { interaction ->
+                    when (interaction) {
+                        is DragInteraction.Start -> {
+                            userDragging = true
+                            userScrollPending = true
+                        }
+                        is DragInteraction.Stop, is DragInteraction.Cancel -> userDragging = false
+                        else -> Unit
                     }
                 }
             }
-            // Auto-follow: on every content growth, scroll to the new bottom.
-            // `snapshotFlow { block.content.length }` is recomposition-cheap
-            // and only ticks when the block's text actually grew.
+            // Follow measured layout growth, not the immutable block captured on first composition.
+            // Programmatic scrolling never arms the user-gesture settlement flag.
             LaunchedEffect(scrollState, block.id, isStreaming) {
-                if (!isStreaming) return@LaunchedEffect
-                snapshotFlow { block.content.length }
-                    .collect {
-                        if (userScrolledAway) return@collect
-                        // scrollTo (not animateScrollTo) — animating fights
-                        // back-to-back token ticks; iOS uses a 0.15s linear
-                        // animation, but Compose's animateScrollTo cancels
-                        // any in-flight scroll, so streaming bursts get
-                        // jankier than a direct snap.
-                        scrollState.scrollTo(scrollState.maxValue)
+                snapshotFlow {
+                    ThinkingScrollLayout(
+                        offset = scrollState.value,
+                        maxOffset = scrollState.maxValue,
+                        scrolling = scrollState.isScrollInProgress,
+                        userDragging = userDragging,
+                        userScrollPending = userScrollPending,
+                    )
+                }.collect { layout ->
+                    if (layout.userGestureSettled) {
+                        userScrolledAway = !layout.atBottom
+                        userScrollPending = false
                     }
+                    if (layout.shouldFollow(isStreaming, userScrolledAway)) {
+                        scrollState.scrollTo(layout.maxOffset)
+                    }
+                }
             }
             Column(
                 modifier = Modifier
