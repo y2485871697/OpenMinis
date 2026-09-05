@@ -127,7 +127,7 @@ class GeminiProvider(
         try {
             var started = false
             var lastFinishReason: String? = null
-                for (sseEvent in SseEventReader(reader)) {
+            for (sseEvent in SseEventReader(reader)) {
                 val payload = sseEvent.data
 
                 val json = try { JSONObject(payload) } catch (_: Exception) { continue }
