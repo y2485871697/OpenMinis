@@ -1660,17 +1660,17 @@ private fun RenderBlock(block: MdBlock) {
             }
             val vScroll = rememberScrollState()
             val hScroll = rememberScrollState()
-            val hasCodeOverflow by remember(hScroll, vScroll) {
-                derivedStateOf { codeBlockHasOverflow(hScroll.maxValue, vScroll.maxValue) }
+            val hasVerticalOverflow by remember(vScroll) {
+                derivedStateOf { codeBlockNeedsScrollUnlock(vScroll.maxValue) }
             }
-            val codeScrollEnabled = hasCodeOverflow && (
+            val codeScrollEnabled = hasVerticalOverflow && (
                 scrollHost?.activeKey == codeScrollKey ||
                     (scrollHost == null && localScrollEnabled)
                 )
             val latestScrollHost by rememberUpdatedState(scrollHost)
             // Resizing or shortening a block must not leave the conversation locked.
-            LaunchedEffect(hasCodeOverflow, codeScrollKey) {
-                if (!hasCodeOverflow) {
+            LaunchedEffect(hasVerticalOverflow, codeScrollKey) {
+                if (!hasVerticalOverflow) {
                     localScrollEnabled = false
                     val host = latestScrollHost
                     if (host?.activeKey == codeScrollKey) host.setActiveKey(null)
@@ -1760,7 +1760,7 @@ private fun RenderBlock(block: MdBlock) {
                             modifier = Modifier.size(18.dp),
                         )
                     }
-                    if (hasCodeOverflow) {
+                    if (hasVerticalOverflow) {
                         IconButton(
                             onClick = {
                                 if (codeScrollEnabled) {
@@ -1768,7 +1768,6 @@ private fun RenderBlock(block: MdBlock) {
                                     // vertical gesture to the conversation.
                                     scope.launch {
                                         vScroll.scrollTo(0)
-                                        hScroll.scrollTo(0)
                                         if (scrollHost != null) {
                                             scrollHost.setActiveKey(null)
                                         } else {
@@ -1783,7 +1782,6 @@ private fun RenderBlock(block: MdBlock) {
                                     }
                                     scope.launch {
                                         vScroll.scrollTo(0)
-                                        hScroll.scrollTo(0)
                                     }
                                 }
                             },
@@ -1834,7 +1832,7 @@ private fun RenderBlock(block: MdBlock) {
                 ) {
                     Box(
                         modifier = Modifier
-                            .horizontalScroll(hScroll, enabled = codeScrollEnabled)
+                            .horizontalScroll(hScroll)
                             .padding(horizontal = 12.dp, vertical = 4.dp),
                     ) {
                         // Register code as a normal selectable text shard.
