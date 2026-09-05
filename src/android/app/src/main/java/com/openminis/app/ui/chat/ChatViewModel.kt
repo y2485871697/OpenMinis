@@ -3097,26 +3097,39 @@ class ChatViewModel(
      * output bodies so we stay well under any context window. Mirrors iOS
      * `buildConversationTextForSummary`.
      */
+    // Keep both ends of large tool payloads. The beginning usually contains
+    // the command/request, while the end contains the exit status, final
+    // paths, or the actual error. Keeping only a prefix was a major source of
+    // summaries that remembered what was attempted but not what happened.
+    private fun summaryExcerpt(value: String, limit: Int): String {
+        if (value.length <= limit) return value
+        val head = (limit * 2 / 3).coerceAtLeast(1)
+        val tail = (limit - head).coerceAtLeast(1)
+        return value.take(head) +
+            "\n...[中间内容已省略，共 ${value.length} 个字符]...\n" +
+            value.takeLast(tail)
+    }
+
     private fun buildConversationTextForSummary(history: List<LLMMessage>): String = buildString {
         for (msg in history) {
             val role = msg.role.name.lowercase()
-            val text = msg.content.take(4000)
+            val text = summaryExcerpt(msg.content, 4000)
             if (text.isNotEmpty()) {
                 append(role).append(": ").append(text).append('\n')
             }
             for (part in msg.contentParts) {
                 when (part) {
                     is AgentContentPart.Text -> {
-                        append(role).append(": ").append(part.text.take(4000)).append('\n')
+                        append(role).append(": ").append(summaryExcerpt(part.text, 4000)).append('\n')
                     }
                     is AgentContentPart.ToolUse -> {
-                        val preview = part.input.toString().take(4000)
+                        val preview = summaryExcerpt(part.input.toString(), 4000)
                         append(role).append(" [tool:").append(part.name).append("]: ")
                             .append(preview).append('\n')
                     }
                     is AgentContentPart.ToolResult -> {
                         append(role).append(" [result:").append(part.name).append("]: ")
-                            .append(part.content.take(8000)).append('\n')
+                            .append(summaryExcerpt(part.content, 8000)).append('\n')
                     }
                     is AgentContentPart.ImageData -> {
                         append(role).append(" [image: ").append(part.mimeType).append("]\n")
