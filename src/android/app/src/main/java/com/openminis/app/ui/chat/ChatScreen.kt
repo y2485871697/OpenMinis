@@ -2011,6 +2011,7 @@ fun ChatScreen(
                     isUserDragging = true
                     followCompletedStream = false
                     userDragAwaitingSettle = true
+                    AppLogger.debug("ScrollReadingAnchor", "drag-start index=${listState.firstVisibleItemIndex} offset=${listState.firstVisibleItemScrollOffset}")
                     // [T-android-scrollbtn-turn-walk] A manual drag breaks the
                     // up-button's turn-walk chain: the next tap should re-anchor
                     // to wherever the user landed, not continue the old sequence.
@@ -3621,6 +3622,59 @@ fun ChatScreen(
                     (if (canResume && !isStreaming && error == null &&
                         messages.lastOrNull { it.role == "assistant" }?.error?.isNotBlank() != true
                     ) 1 else 0)
+                // Preserve the text under the viewport while the same reverse-layout
+                // row grows. A stable row key alone only preserves its bottom edge.
+                val readingLeadingRows = androidx.compose.runtime.rememberUpdatedState(searchLeadingRows)
+                LaunchedEffect(listState, sessionId) {
+                    var previous: ReverseReadingAnchor? = null
+                    var liveAnchorKey: Any? = null
+                    var lastLogMs = 0L
+                    snapshotFlow {
+                        val info = listState.layoutInfo
+                        val first = info.visibleItemsInfo.firstOrNull { it.index == listState.firstVisibleItemIndex }
+                        val row = first?.let {
+                            flatItems.getOrNull(flatItems.size - 1 - (it.index - readingLeadingRows.value))
+                                ?.takeIf { row -> row.key == it.key }
+                        }
+                        val live = when (row) {
+                            is FlatChatItem.AssistantText -> row.isStreaming
+                            is FlatChatItem.AssistantMarkdownBlock -> row.messageIsStreaming
+                            is FlatChatItem.AssistantThinking -> row.messageIsStreaming && row.isLastBlockOverall
+                            is FlatChatItem.AssistantLegacyContent -> row.isStreaming
+                            else -> false
+                        }
+                        val current = first?.let {
+                            ReverseReadingAnchor(it.key, it.size, listState.firstVisibleItemScrollOffset,
+                                info.viewportSize.width, info.viewportSize.height,
+                                info.beforeContentPadding, info.afterContentPadding)
+                        }
+                        Triple(current, userScrolledAway && pendingSearchMessageId == null, live)
+                    }.distinctUntilChanged().collect { (current, reading, live) ->
+                        if (!reading || current == null) {
+                            previous = null
+                            liveAnchorKey = null
+                            return@collect
+                        }
+                        if (current.key != previous?.key) liveAnchorKey = null
+                        if (live) liveAnchorKey = current.key
+                        val now = System.currentTimeMillis()
+                        val draining = viewModel.isStreaming.value ||
+                            (lastStreamEndMs > 0L && now - lastStreamEndMs in 0..STREAM_END_ARM_GRACE_MS)
+                        val growth = if (liveAnchorKey == current.key && draining)
+                            current.growthSince(previous) else 0
+                        previous = current
+                        if (growth > 0) {
+                            // This is geometry compensation, not a new scroll intent.
+                            // Raw delta keeps the ongoing drag/fling alive and avoids
+                            // cancelling it with scrollToItem/requestScrollToItem.
+                            val consumed = listState.dispatchRawDelta(growth.toFloat())
+                            if (now - lastLogMs >= 500L) {
+                                lastLogMs = now
+                                AppLogger.debug("ScrollReadingAnchor", "growth=$growth consumed=$consumed key=${current.key}")
+                            }
+                        }
+                    }
+                }
                 LaunchedEffect(pendingSearchMessageId, flatItems, imeBottomPx, searchLeadingRows) {
                     val target = pendingSearchMessageId ?: return@LaunchedEffect
                     val originalIndex = flatItems.indexOfFirst { item ->
