@@ -41,7 +41,7 @@ class StreamingListMarkerPresentationTest {
     }
 
     @Test fun literalsNegativeNumbersAndInlineCodeAreUnchanged() = runBlocking {
-        for (raw in listOf("-1", "-0.5", "+", "+2", "*", "**", "a -", "a-b", "\\-", "\\+", "\\*", "`-`", "`-", "--flag", "**bold**")) {
+        for (raw in listOf("-1", "-0.5", "+2", "*", "**", "a -", "a-b", "\\-", "\\+", "\\*", "`-`", "`-", "--flag", "**bold**")) {
             assertEquals(raw, markdownBlockPresentationForTest(raw, false), markdownBlockPresentationForTest(raw, true))
         }
     }

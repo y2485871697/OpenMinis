@@ -595,8 +595,8 @@ private fun StreamingMarkdownTextBody(
 ) {
     val parsedBlocks = rememberParsedMarkdown(content, isStreaming)
     val liveTail = isOpenMarkdownTail(content, isStreaming)
-    val blocks = remember(parsedBlocks, liveTail) {
-        markdownBlocksForPresentation(parsedBlocks, liveTail)
+    val blocks = remember(parsedBlocks, isStreaming, liveTail) {
+        markdownBlocksForPresentation(parsedBlocks, isStreaming, liveTail)
     }
 
     ShardSubIndexScope {
@@ -860,8 +860,8 @@ private fun MarkdownBlockBody(
 ) {
     val parsedBlocks = rememberParsedMarkdown(rawText, isStreaming)
     val liveTail = isOpenMarkdownTail(rawText, isStreaming)
-    val blocks = remember(parsedBlocks, liveTail) {
-        markdownBlocksForPresentation(parsedBlocks, liveTail)
+    val blocks = remember(parsedBlocks, isStreaming, liveTail) {
+        markdownBlocksForPresentation(parsedBlocks, isStreaming, liveTail)
     }
     Column(modifier = modifier) {
         androidx.compose.runtime.CompositionLocalProvider(LocalStreamingMarkdown provides isStreaming) {
@@ -1527,17 +1527,33 @@ private fun isOpenMarkdownTail(content: String, isStreaming: Boolean): Boolean =
     isStreaming && !content.endsWith('\n') && !content.endsWith('\r')
 
 /** Display-only: never store a provisional bullet in the canonical AST cache. */
-private fun markdownBlocksForPresentation(blocks: List<MdBlock>, isStreamingTail: Boolean): List<MdBlock> {
-    if (!isStreamingTail) return blocks
+private fun markdownBlocksForPresentation(
+    blocks: List<MdBlock>,
+    isStreaming: Boolean,
+    tailIsOpen: Boolean = true,
+): List<MdBlock> {
+    if (!isStreaming) return blocks
     val block = blocks.lastOrNull() ?: return blocks
     return when (block) {
         is MdBlock.Paragraph -> {
             val lineStart = block.raw.lastIndexOf('\n') + 1
             val tail = block.raw.substring(lineStart).trimStart()
-            if (tail != "-") return blocks
+            val bullet = tailIsOpen && tail in setOf("-", "+")
+            val rule = tailIsOpen && tail == "--"
+            val table = tail.startsWith('|') && !tail.startsWith("||")
+            if (!bullet && !rule && !table) return blocks
             val precedingText = block.raw.substring(0, lineStart).trimEnd('\r', '\n')
             val result = blocks.dropLast(1).toMutableList()
             if (precedingText.isNotEmpty()) result.add(MdBlock.Paragraph(precedingText))
+            if (rule) {
+                result.add(MdBlock.HorizontalRule(tail))
+                return result
+            }
+            if (table) {
+                val (headers, rows) = parseTable(tail)
+                result.add(MdBlock.Table(tail, headers, rows))
+                return result
+            }
             // Match the final list's structure and spacing from its first token.
             // Do not add a second list container below existing bullet items.
             val previous = result.lastOrNull()
@@ -1551,11 +1567,21 @@ private fun markdownBlocksForPresentation(blocks: List<MdBlock>, isStreamingTail
             result
         }
         is MdBlock.BlockQuote -> {
-            val inner = markdownBlocksForPresentation(block.innerBlocks, true)
+            val inner = markdownBlocksForPresentation(block.innerBlocks, true, tailIsOpen)
             if (inner === block.innerBlocks) blocks
             else blocks.dropLast(1) + MdBlock.BlockQuote(block.raw, inner)
         }
-        // Code, tables, math and already recognized lists keep their exact AST.
+        is MdBlock.UnorderedList -> {
+            val last = block.items.lastOrNull() ?: return blocks
+            if (last.text !in setOf("[ ", "[x", "[X", "[ ]", "[x]", "[X]")) return blocks
+            val result = blocks.dropLast(1).toMutableList()
+            if (block.items.size > 1) {
+                result.add(MdBlock.UnorderedList(block.raw, block.items.dropLast(1)))
+            }
+            result.add(MdBlock.TaskList(block.raw, listOf(TaskItem(last.text.startsWith("[x", true), ""))))
+            result
+        }
+        // Code, math and fully recognized blocks keep their exact AST.
         else -> blocks
     }
 }
@@ -1570,7 +1596,7 @@ internal suspend fun markdownBlockPresentationForTest(
         is MdBlock.BlockQuote -> block.innerBlocks.flatMap { describe(it) }
         else -> listOf(block.javaClass.simpleName to block.raw)
     }
-    return markdownBlocksForPresentation(blocks, isOpenMarkdownTail(content, isStreaming))
+    return markdownBlocksForPresentation(blocks, isStreaming, isOpenMarkdownTail(content, isStreaming))
         .flatMap { describe(it) }
 }
 
@@ -3385,10 +3411,32 @@ internal fun parseInlinePresentationForTest(text: String, streaming: Boolean): A
         Color.Black, Color.Black, Color.Black, Color.Black, Color.Black, streaming,
     ))
 
+private data class StreamingLinkPreview(val label: String, val image: Boolean)
+
+/** A partial destination is never exposed as a URL annotation or visible text. */
+private fun streamingLinkPreview(text: String, start: Int): StreamingLinkPreview? {
+    val image = text.startsWith("![", start)
+    if (!image && text.getOrNull(start) != '[') return null
+    val from = start + if (image) 2 else 1
+    if (text.indexOf('\n', from) >= 0 || text.indexOf('\r', from) >= 0) return null
+    val closeLabel = text.indexOf(']', from)
+    val hasDestination = closeLabel >= 0 && text.getOrNull(closeLabel + 1) == '('
+    // Preserve ordinary numeric bracket expressions unless a URL is confirmed.
+    if (!image && text.getOrNull(from)?.isDigit() == true && !hasDestination) return null
+    if (closeLabel < 0) return StreamingLinkPreview(text.substring(from), image)
+    if (closeLabel == text.lastIndex ||
+        (hasDestination && text.indexOf(')', closeLabel + 2) < 0)
+    ) return StreamingLinkPreview(text.substring(from, closeLabel), image)
+    return null
+}
+
 private fun parseInline(text: String, colors: MdColors): AnnotatedString {
     return buildAnnotatedString {
         var i = 0
         while (i < text.length) {
+            val linkPreview = if (colors.streaming && (text[i] == '[' || text.startsWith("![", i))) {
+                streamingLinkPreview(text, i)
+            } else null
             when {
                 // [T-latex-inline] `\( … \)` inline math must be matched BEFORE the
                 // generic `\`-escape branch below — otherwise `\(` is consumed as
@@ -3406,6 +3454,19 @@ private fun parseInline(text: String, colors: MdColors): AnnotatedString {
                 text[i] == '\\' && i + 1 < text.length -> {
                     append(text[i + 1]); i += 2
                 }
+                linkPreview != null -> {
+                    if (linkPreview.label.isNotEmpty()) {
+                        withStyle(SpanStyle(color = colors.link, textDecoration = TextDecoration.Underline)) {
+                            append(if (linkPreview.image) "[${linkPreview.label}]" else linkPreview.label)
+                        }
+                    }
+                    i = text.length
+                }
+                // Escape/image/strike openers need one more character to decide.
+                colors.streaming && i == text.lastIndex &&
+                    (text[i] == '\\' ||
+                        (text[i] == '~' && (i == 0 || text[i - 1].isWhitespace())) ||
+                        (text[i] == '!' && (i == 0 || text[i - 1] == '\n'))) -> { i++ }
                 // Image: ![alt](url) — render as [alt] link
                 text.startsWith("![", i) -> {
                     val cb = text.indexOf(']', i + 2)
@@ -3516,10 +3577,12 @@ private fun parseInline(text: String, colors: MdColors): AnnotatedString {
                     } else { append(text[i]); i++ }
                 }
                 // Italic: *text* or _text_ (single delimiter, not followed by same)
-                (text[i] == '*' || text[i] == '_') && i + 1 < text.length && text[i + 1] != text[i] && text[i + 1] != ' ' -> {
+                (text[i] == '*' || text[i] == '_') &&
+                    ((i + 1 < text.length && text[i + 1] != text[i] && !text[i + 1].isWhitespace()) ||
+                        (colors.streaming && i == text.lastIndex && (i == 0 || !text[i - 1].isLetterOrDigit()))) -> {
                     val delim = text[i]
-                    val end = text.indexOf(delim, i + 1)
-                    if (end != -1 && end > i + 1) {
+                    val end = streamingEmphasisEnd(text, i, delim.toString(), colors.streaming)
+                    if (end >= i + 1) {
                         withStyle(SpanStyle(fontStyle = FontStyle.Italic)) {
                             appendRecursive(text.substring(i + 1, end), colors)
                         }
@@ -3538,76 +3601,7 @@ private fun parseInline(text: String, colors: MdColors): AnnotatedString {
 
 /** Recursively parse inline markdown within a styled span. */
 private fun AnnotatedString.Builder.appendRecursive(text: String, colors: MdColors) {
-    var i = 0
-    while (i < text.length) {
-        when {
-            // [T-latex-inline] Inline math must be handled INSIDE emphasis too —
-            // `**$\approx$**`, `*$x$*`, `~~$a$~~` all appear in AI replies. Without
-            // these branches emphasis content fell through to the literal `else`
-            // and the `$…$` / `\(…\)` rendered as raw dollar text. The KaTeX
-            // InlineTextContent slots are pre-registered by collectInlineMathLatex
-            // (which scans the whole raw line, emphasis markers included), so
-            // emitting the tag here resolves to the same rendered math. Placed
-            // before the `\` escape branch so `\(` is treated as math, not an
-            // escaped `(`.
-            text.startsWith("\\(", i) -> {
-                val end = text.indexOf("\\)", i + 2)
-                if (end != -1) {
-                    appendInlineContent(katexInlineTagFor(text.substring(i + 2, end)), text.substring(i + 2, end))
-                    i = end + 2
-                } else { append(text[i]); i++ }
-            }
-            text[i] == '$' && i + 1 < text.length && text[i + 1] != '$' && text[i + 1] != ' ' -> {
-                val end = findInlineMathClose(text, i + 1)
-                if (end != -1) {
-                    val latex = text.substring(i + 1, end)
-                    if (looksLikeMath(latex) && !isTablePipeArtifact(latex)) {
-                        appendInlineContent(katexInlineTagFor(latex), latex)
-                        i = end + 1
-                    } else { append(text[i]); i++ }
-                } else { append(text[i]); i++ }
-            }
-            text[i] == '\\' && i + 1 < text.length -> { append(text[i + 1]); i += 2 }
-            text.startsWith("```", i) -> { append("```"); i += 3 }
-            text[i] == '`' -> {
-                val end = findInlineCodeClose(text, i + 1)
-                if (end != -1) {
-                    val codeStyle = SpanStyle(fontFamily = FontFamily.Monospace, color = colors.inlineCodeText)
-                    withStyle(codeStyle) { append("\u2006") }
-                    // See T223 in the top-level inline-code branch \u2014 annotation
-                    // excludes the U+2006 pads to keep wrap-line background
-                    // from overshooting onto the prior line.
-                    val annStart = length
-                    withStyle(codeStyle) { append(text.substring(i + 1, end)) }
-                    val annEnd = length
-                    withStyle(codeStyle) { append("\u2006") }
-                    addStringAnnotation("inline_code", "", annStart, annEnd)
-                    i = end + 1
-                } else { append(text[i]); i++ }
-            }
-            text.startsWith("~~", i) -> {
-                val end = text.indexOf("~~", i + 2)
-                if (end != -1) {
-                    withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) { append(text.substring(i + 2, end)) }
-                    i = end + 2
-                } else { append(text[i]); i++ }
-            }
-            text[i] == '[' -> {
-                val cb = text.indexOf(']', i + 1)
-                if (cb != -1 && cb + 1 < text.length && text[cb + 1] == '(') {
-                    val cp = text.indexOf(')', cb + 2)
-                    if (cp != -1) {
-                        val url = text.substring(cb + 2, cp).trim()
-                        val linkStart = length
-                        withStyle(SpanStyle(color = colors.link, textDecoration = TextDecoration.Underline)) { append(text.substring(i + 1, cb)) }
-                        addStringAnnotation("url", url, linkStart, length)
-                        i = cp + 1
-                    } else { append(text[i]); i++ }
-                } else { append(text[i]); i++ }
-            }
-            else -> { append(text[i]); i++ }
-        }
-    }
+    append(parseInline(text, colors))
 }
 
 /**
