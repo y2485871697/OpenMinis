@@ -12445,7 +12445,16 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
 
     private data class ToolResultData(val output: String, val success: Boolean)
 
-    private fun MessageEntity.toLLMMessage(): LLMMessage {
+    private fun MessageEntity.toLLMMessage(): LLMMessage =
+        originalMessageForModel(role, partsJson, id, reasoningContent)
+
+    // Only original fields cross this boundary; display-only metadata stays on the entity.
+    private fun originalMessageForModel(
+        role: String,
+        partsJson: String,
+        id: String,
+        reasoningContent: String?,
+    ): LLMMessage {
         val r = if (role == "user") LLMMessage.Role.USER else LLMMessage.Role.ASSISTANT
         val contentParts = mutableListOf<AgentContentPart>()
         val imageParts = mutableListOf<LLMMessage.ImagePart>()
