@@ -625,7 +625,7 @@ internal fun formatToolDetailsForClipboard(block: AssistantBlock): String {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun ToolCallPill(
+private const val TOOL_RESULT_PREVIEW_CHARS = 4_000`n`ninternal fun ToolCallPill(
     block: AssistantBlock,
     allToolBlocks: List<AssistantBlock> = listOf(block),
     onRetry: (() -> Unit)? = null,
@@ -826,8 +826,17 @@ internal fun ToolCallPill(
           }
           if (block.content.isNotBlank()) {
               HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+              // Compose Text may still build a paragraph for the full source even
+              // with maxLines. Tool results can be 100KB+ in long agent sessions,
+              // so keep the inline preview bounded; the detail sheet retains the
+              // complete result for explicit inspection/copy.
+              val preview = if (block.content.length > TOOL_RESULT_PREVIEW_CHARS) {
+                  block.content.take(TOOL_RESULT_PREVIEW_CHARS) + "..."
+              } else {
+                  block.content.trim()
+              }
               Text(
-                  text = block.content.trim(),
+                  text = preview,
                   modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
                   color = MaterialTheme.colorScheme.onSurfaceVariant,
                   fontFamily = FontFamily.Monospace,
