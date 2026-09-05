@@ -941,7 +941,7 @@ class OpenAIProvider private constructor(
 
         try {
             send(LLMStreamChunk.Started)
-    
+
             // Branch streaming parser based on API format
             val isResponsesAPI = !usesChatCompletionsAPI
 
@@ -2692,8 +2692,19 @@ class OpenAIProvider private constructor(
             }
         }
 
-        for (sseEvent in SseEventReader(reader)) {
-                val payload = sseEvent.data
+        var line: String?
+        while (reader.readLine().also { line = it } != null) {
+            val l = line ?: continue
+            // Tolerate both `data: {…}` and `data:{…}` (same as the chat path).
+            if (!l.startsWith("data:")) continue
+            val payload = l.removePrefix("data:").let { if (it.startsWith(" ")) it.removePrefix(" ") else it }
+            if (payload == "[DONE]") break
+
+            val event = try { JSONObject(payload) } catch (e: Exception) { continue }
+            when (event.optString("type")) {
+                "response.output_item.done" -> {
+                    event.optJSONObject("item")?.let { scanItem(it) }
+                }
                 "response.output_text.done", "response.output_text.delta" -> {
                     event.optString("text").takeIf { it.isNotEmpty() }?.let { refusalText = it }
                         ?: event.optString("delta").takeIf { it.isNotEmpty() }
