@@ -63,6 +63,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
@@ -1657,13 +1658,28 @@ private fun RenderBlock(block: MdBlock) {
             val codeScrollKey = remember(block.raw, codeShardId) {
                 "${codeShardId?.messageId}:${codeShardId?.shardId}:${block.raw.hashCode()}"
             }
-            val codeScrollEnabled = scrollHost?.activeKey == codeScrollKey ||
-                (scrollHost == null && localScrollEnabled)
+            val vScroll = rememberScrollState()
+            val hScroll = rememberScrollState()
+            val hasCodeOverflow by remember(hScroll, vScroll) {
+                derivedStateOf { codeBlockHasOverflow(hScroll.maxValue, vScroll.maxValue) }
+            }
+            val codeScrollEnabled = hasCodeOverflow && (
+                scrollHost?.activeKey == codeScrollKey ||
+                    (scrollHost == null && localScrollEnabled)
+                )
             val latestScrollHost by rememberUpdatedState(scrollHost)
-            val latestScrollEnabled by rememberUpdatedState(codeScrollEnabled)
+            // Resizing or shortening a block must not leave the conversation locked.
+            LaunchedEffect(hasCodeOverflow, codeScrollKey) {
+                if (!hasCodeOverflow) {
+                    localScrollEnabled = false
+                    val host = latestScrollHost
+                    if (host?.activeKey == codeScrollKey) host.setActiveKey(null)
+                }
+            }
             DisposableEffect(codeScrollKey) {
                 onDispose {
-                    if (latestScrollEnabled) latestScrollHost?.setActiveKey(null)
+                    val host = latestScrollHost
+                    if (host?.activeKey == codeScrollKey) host.setActiveKey(null)
                 }
             }
             val fileExtension = remember(block.language) {
@@ -1691,8 +1707,7 @@ private fun RenderBlock(block: MdBlock) {
                     copied = false
                 }
             }
-            val vScroll = rememberScrollState()
-            val hScroll = rememberScrollState()
+
             if (showFullscreen) {
                 FullscreenCodeDialog(
                     language = block.language.ifEmpty { "code" },
@@ -1745,48 +1760,50 @@ private fun RenderBlock(block: MdBlock) {
                             modifier = Modifier.size(18.dp),
                         )
                     }
-                    IconButton(
-                        onClick = {
-                            if (codeScrollEnabled) {
-                                // Restore the first line before returning the
-                                // vertical gesture to the conversation.
-                                scope.launch {
-                                    vScroll.scrollTo(0)
-                                    hScroll.scrollTo(0)
+                    if (hasCodeOverflow) {
+                        IconButton(
+                            onClick = {
+                                if (codeScrollEnabled) {
+                                    // Restore the first line before returning the
+                                    // vertical gesture to the conversation.
+                                    scope.launch {
+                                        vScroll.scrollTo(0)
+                                        hScroll.scrollTo(0)
+                                        if (scrollHost != null) {
+                                            scrollHost.setActiveKey(null)
+                                        } else {
+                                            localScrollEnabled = false
+                                        }
+                                    }
+                                } else {
                                     if (scrollHost != null) {
-                                        scrollHost.setActiveKey(null)
+                                        scrollHost.setActiveKey(codeScrollKey)
                                     } else {
-                                        localScrollEnabled = false
+                                        localScrollEnabled = true
+                                    }
+                                    scope.launch {
+                                        vScroll.scrollTo(0)
+                                        hScroll.scrollTo(0)
                                     }
                                 }
-                            } else {
-                                if (scrollHost != null) {
-                                    scrollHost.setActiveKey(codeScrollKey)
+                            },
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.UnfoldMore,
+                                contentDescription = if (codeScrollEnabled) {
+                                    "Disable code block scrolling"
                                 } else {
-                                    localScrollEnabled = true
-                                }
-                                scope.launch {
-                                    vScroll.scrollTo(0)
-                                    hScroll.scrollTo(0)
-                                }
-                            }
-                        },
-                        modifier = Modifier.size(32.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.UnfoldMore,
-                            contentDescription = if (codeScrollEnabled) {
-                                "Disable code block scrolling"
-                            } else {
-                                "Enable code block scrolling"
-                            },
-                            tint = if (codeScrollEnabled) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
-                            },
-                            modifier = Modifier.size(17.dp),
-                        )
+                                    "Enable code block scrolling"
+                                },
+                                tint = if (codeScrollEnabled) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                                },
+                                modifier = Modifier.size(17.dp),
+                            )
+                        }
                     }
                     IconButton(
                         onClick = {
