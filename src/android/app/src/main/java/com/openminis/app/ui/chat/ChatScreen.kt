@@ -556,9 +556,14 @@ private fun liveStreamingDelta(
         // can hold the final snapshot until the next scroll/layout pass,
         // which makes a completed reply appear stuck until the user swipes.
         viewModel.streamingById
-            .map { it[messageId] }
+            .map { overlay ->
+                overlay[messageId] ?: canonicalStreamingDelta(
+                    viewModel.messages.value.firstOrNull { it.id == messageId },
+                )
+            }
     }
-    val target by flow.collectAsState(initial = null)
+    val target by flow.collectAsState(initial = viewModel.streamingById.value[messageId]
+        ?: canonicalStreamingDelta(viewModel.messages.value.firstOrNull { it.id == messageId }))
     val currentTarget = target ?: fallbackTarget ?: return null
     if (animateTextBlockId == null) return currentTarget
 
@@ -3553,6 +3558,10 @@ fun ChatScreen(
                                 sameStreamingLayout(previous.second, next.second)
                         }
                         .collect { (msgs, stream) ->
+                            if (hasStaleStreamingHandoff(msgs, stream, viewModel.messages.value)) {
+                                // Keep already painted rows until the canonical window arrives.
+                                return@collect
+                            }
                             val tickStartNs = System.nanoTime()
                             if (stream.isNotEmpty() && !streamWasActive) {
                                 streamWasActive = true
@@ -3594,7 +3603,10 @@ fun ChatScreen(
                                     // threw ConcurrentModificationException from
                                     // a later frame's SubList.equals. Copying
                                     // severs the view so it can't comodify.
-                                    buildFlatChatItems(msgs.take(splitIdx), sessionId)
+                                    buildFlatChatItems(
+                                        msgs.take(splitIdx), sessionId,
+                                        lastAssistantMessageId = msgs.lastOrNull { it.role == "assistant" }?.id,
+                                    )
                                 }
                                 val buildMs = (System.nanoTime() - tBuildStart) / 1_000_000
                                 frozenRows = rows
@@ -4318,6 +4330,7 @@ fun ChatScreen(
                                 BoundsTrackedBlock(
                                     messageId = item.messageId,
                                     slotKey = "text:${item.block.id}",
+                                    animateSize = false,
                                     markdown = liveMarkdown,
                                 ) {
                                     LargeContentGuard(

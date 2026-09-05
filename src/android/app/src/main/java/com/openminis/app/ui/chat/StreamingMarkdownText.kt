@@ -198,6 +198,8 @@ private fun currentSelectionHighlightColor(): Color {
 }
 
 // ─── Markdown color palette — resolved per-composition via currentMdColors() ──
+private val LocalStreamingMarkdown = compositionLocalOf { false }
+
 private data class MdColors(
     val text: Color,
     val codeText: Color,
@@ -209,6 +211,7 @@ private data class MdColors(
     val divider: Color,
     val tableBorder: Color,
     val tableHeaderBg: Color,
+    val streaming: Boolean = false,
 )
 
 @Composable
@@ -226,6 +229,7 @@ private fun currentMdColors(): MdColors {
         divider = c.separator,
         tableBorder = c.tableBorder,
         tableHeaderBg = c.secondaryBg,
+        streaming = LocalStreamingMarkdown.current,
     )
 }
 
@@ -546,8 +550,10 @@ fun StreamingMarkdownText(
 @Composable
 private fun rememberParsedMarkdown(content: String, isStreaming: Boolean): List<MdBlock> {
     val latestContent by rememberUpdatedState(content)
-    val colors = currentMdColors()
-    var blocks by remember { mutableStateOf<List<MdBlock>>(emptyList()) }
+    val colors = currentMdColors().copy(streaming = isStreaming)
+    var blocks by remember {
+        mutableStateOf(MarkdownParseCaches.cachedBlocks(content).orEmpty())
+    }
     // Completion restarts the collector with the exact final input. A previous
     // sampled prefix or failed parse must not remain visible until row recycling.
     LaunchedEffect(colors, isStreaming) {
@@ -558,7 +564,9 @@ private fun rememberParsedMarkdown(content: String, isStreaming: Boolean): List<
             .map { snapshot ->
                 try {
                     if (isStreaming) {
-                        parseStreamingMarkdownBlocks(snapshot, colors, nodeBuffer.update(snapshot))
+                        parseStreamingMarkdownBlocks(snapshot, colors, nodeBuffer.update(snapshot)).also {
+                            MarkdownParseCaches.putBlocks(snapshot, it)
+                        }
                     } else {
                         MarkdownParseCaches.blocks(snapshot).also {
                             MarkdownParseCaches.prewarm(it, colors)
@@ -570,11 +578,11 @@ private fun rememberParsedMarkdown(content: String, isStreaming: Boolean): List<
                         "Markdown", "snapshot parse failed chars=${snapshot.length}: ${error.message}",
                     )
                     // Keep collecting newer snapshots after a malformed prefix.
-                    listOf(MdBlock.CodeBlock(snapshot, "", snapshot))
+                    null // Preserve the last formatted frame; never flash Markdown source.
                 }
             }
             .flowOn(Dispatchers.Default)
-            .collect { blocks = it }
+            .collect { parsed -> if (parsed != null) blocks = parsed }
     }
     return blocks
 }
@@ -589,14 +597,7 @@ private fun StreamingMarkdownTextBody(
 
     ShardSubIndexScope {
         Column(modifier = modifier) {
-            if (blocks.isEmpty() && content.isNotBlank()) {
-                Text(
-                    text = content.take(COLD_PARSE_PREVIEW_CHARS),
-                    fontSize = BaseFontSize,
-                    lineHeight = BaseLineHeight,
-                    color = currentMdColors().text,
-                )
-            } else {
+            androidx.compose.runtime.CompositionLocalProvider(LocalStreamingMarkdown provides isStreaming) {
                 blocks.forEach { block -> RenderBlock(block) }
             }
         }
@@ -853,59 +854,13 @@ private fun MarkdownBlockBody(
     isStreaming: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    // [T-android-live-block-degrade] B-lite: a LIVE fragment that has grown
-    // huge is almost always an unsplittable single block (the splitter keeps
-    // tables/fences whole — exactly the MiniMax giant-table ANR load). Parsing
-    // it in full on every publish is O(fragment) with no upper bound, so over
-    // the threshold render a bounded plain-text tail instead and do the full
-    // parse ONCE when the fragment freezes (isStreaming flips false above).
-    if (isStreaming && rawText.length > LIVE_FRAGMENT_DEGRADE_CHARS) {
-        Column(modifier = modifier) {
-            Text(
-                text = stringResource(R.string.chat_stream_degraded_notice),
-                style = MaterialTheme.typography.labelSmall,
-                color = currentMdColors().blockquote,
-            )
-            Text(
-                text = "…" + rawText.takeLast(LIVE_FRAGMENT_TAIL_CHARS),
-                fontSize = BaseFontSize,
-                lineHeight = BaseLineHeight,
-                color = currentMdColors().text,
-            )
-        }
-        return
-    }
     val blocks = rememberParsedMarkdown(rawText, isStreaming)
     Column(modifier = modifier) {
-        if (blocks.isEmpty() && rawText.isNotBlank()) {
-            Text(
-                text = rawText.take(COLD_PARSE_PREVIEW_CHARS),
-                fontSize = BaseFontSize,
-                lineHeight = BaseLineHeight,
-                color = currentMdColors().text,
-            )
-        } else {
+        androidx.compose.runtime.CompositionLocalProvider(LocalStreamingMarkdown provides isStreaming) {
             blocks.forEach { RenderBlock(it) }
         }
     }
 }
-
-/**
- * [T-android-live-block-degrade] A LIVE fragment larger than this renders as a
- * bounded plain-text tail until it freezes. 8KB of markdown in one unsplit
- * block is far beyond normal prose paragraphs — only giant tables/fences get
- * here, and those were the per-tick full-re-parse ANR load.
- */
-private const val LIVE_FRAGMENT_DEGRADE_CHARS = 8_000
-private const val LIVE_FRAGMENT_TAIL_CHARS = 3_000
-
-/**
- * [T-android-coldload-offmain-parse] A FROZEN fragment above this size whose
- * block parse would be a cache MISS parses off-main (with a plain-text preview
- * in the meantime) instead of synchronously in composition. Below it the parse
- * is sub-ms and the placeholder swap would flicker for nothing.
- */
-private const val COLD_PARSE_PREVIEW_CHARS = 4_000
 
 /**
  * [T-android-coldload-offmain-parse] Composition-snapshot prewarmer for the
@@ -3346,6 +3301,31 @@ internal fun safeInlineSplitOffset(text: String): Int {
     return lastSafeNewlineEnd
 }
 
+// Only the display of an unfinished inline span is provisional. Stored text
+// and the frozen parser retain literal unmatched delimiters.
+internal fun streamingEmphasisEnd(text: String, start: Int, marker: String, streaming: Boolean): Int {
+    val from = start + marker.length
+    val closed = text.indexOf(marker, from)
+    if (closed >= 0 || !streaming) return closed
+    if (from < text.length && text[from].isWhitespace()) return -1
+    if (text.indexOf('\n', from) >= 0) return -1
+    if (marker[0] == '_' && start > 0 && text[start - 1].isLetterOrDigit()) return -1
+    var end = text.length
+    var partial = 0
+    while (end > from && text[end - 1] == marker[0] && partial < marker.length - 1) {
+        end--
+        partial++
+    }
+    return end
+}
+
+@androidx.annotation.VisibleForTesting
+internal fun parseInlinePresentationForTest(text: String, streaming: Boolean): AnnotatedString =
+    parseInline(text, MdColors(
+        Color.Black, Color.Black, Color.Black, Color.Black, Color.Black,
+        Color.Black, Color.Black, Color.Black, Color.Black, Color.Black, streaming,
+    ))
+
 private fun parseInline(text: String, colors: MdColors): AnnotatedString {
     return buildAnnotatedString {
         var i = 0
@@ -3381,7 +3361,7 @@ private fun parseInline(text: String, colors: MdColors): AnnotatedString {
                 }
                 // Bold + italic: ***text***
                 text.startsWith("***", i) -> {
-                    val end = text.indexOf("***", i + 3)
+                    val end = streamingEmphasisEnd(text, i, "***", colors.streaming)
                     if (end != -1) {
                         withStyle(SpanStyle(fontWeight = FontWeight.Bold, fontStyle = FontStyle.Italic)) {
                             appendRecursive(text.substring(i + 3, end), colors)
@@ -3391,7 +3371,7 @@ private fun parseInline(text: String, colors: MdColors): AnnotatedString {
                 }
                 // Bold: **text** or __text__
                 text.startsWith("**", i) -> {
-                    val end = text.indexOf("**", i + 2)
+                    val end = streamingEmphasisEnd(text, i, "**", colors.streaming)
                     if (end != -1) {
                         withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
                             appendRecursive(text.substring(i + 2, end), colors)
@@ -3400,7 +3380,7 @@ private fun parseInline(text: String, colors: MdColors): AnnotatedString {
                     } else { append(text[i]); i++ }
                 }
                 text.startsWith("__", i) -> {
-                    val end = text.indexOf("__", i + 2)
+                    val end = streamingEmphasisEnd(text, i, "__", colors.streaming)
                     if (end != -1) {
                         withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
                             appendRecursive(text.substring(i + 2, end), colors)
@@ -3410,7 +3390,7 @@ private fun parseInline(text: String, colors: MdColors): AnnotatedString {
                 }
                 // Strikethrough: ~~text~~
                 text.startsWith("~~", i) -> {
-                    val end = text.indexOf("~~", i + 2)
+                    val end = streamingEmphasisEnd(text, i, "~~", colors.streaming)
                     if (end != -1) {
                         withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) {
                             appendRecursive(text.substring(i + 2, end), colors)
@@ -3453,6 +3433,11 @@ private fun parseInline(text: String, colors: MdColors): AnnotatedString {
                         withStyle(codeStyle) { append("\u2006") }
                         addStringAnnotation("inline_code", "", annStart, annEnd)
                         i = end + 1
+                    } else if (colors.streaming) {
+                        withStyle(SpanStyle(fontFamily = FontFamily.Monospace, color = colors.inlineCodeText)) {
+                            append(text.substring(i + 1))
+                        }
+                        i = text.length
                     } else { append(text[i]); i++ }
                 }
                 // Link: [text](url)

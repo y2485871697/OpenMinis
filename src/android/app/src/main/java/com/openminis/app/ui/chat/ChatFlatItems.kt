@@ -532,6 +532,25 @@ internal fun mergeStreamingOverlay(
     }
 }
 
+// The UI window is asynchronously projected from canonical messages. Do not
+// publish its old empty streaming row after the terminal overlay is withdrawn.
+internal fun hasStaleStreamingHandoff(
+    displayed: List<ChatMessage>,
+    streaming: Map<String, StreamingDelta>,
+    canonical: List<ChatMessage>,
+): Boolean = displayed.any { old ->
+    old.isStreaming && old.id !in streaming &&
+        canonical.firstOrNull { it.id == old.id } != old
+}
+
+internal fun canonicalStreamingDelta(message: ChatMessage?): StreamingDelta? = message?.let {
+    StreamingDelta(
+        content = it.content,
+        toolBlocks = it.toolBlocks,
+        isAwaitingModelResponse = it.isAwaitingModelResponse,
+    )
+}
+
 internal fun buildFlatChatItems(
     messages: List<ChatMessage>,
     // [T-android-perf-logging] Optional — when supplied, emit a progress
@@ -549,6 +568,7 @@ internal fun buildFlatChatItems(
     // prefix so the defensive key-collision suffixing behaves exactly as a
     // single full build would.
     seedKeys: Set<String> = emptySet(),
+    lastAssistantMessageId: String? = messages.lastOrNull { it.role == "assistant" }?.id,
 ): List<FlatChatItem> {
     val out = mutableListOf<FlatChatItem>()
     val usedKeys = if (seedKeys.isEmpty()) mutableSetOf() else seedKeys.toMutableSet()
@@ -653,8 +673,7 @@ internal fun buildFlatChatItems(
         val lastBlockId = blocks.lastOrNull()?.id
         val lastTextIdx = blocks.indexOfLast { it.kind == "text" }
         val hasAnyTextBlock = lastTextIdx >= 0
-        val isLastAssistantTurn = idx == messages.lastIndex ||
-            (idx + 1 until messages.size).all { messages[it].role != "assistant" }
+        val isLastAssistantTurn = message.id == lastAssistantMessageId
         // Only the last cancelled tool_use in the message gets the Retry button —
         // retryLast() re-runs the whole turn, so one button is enough.
         val lastCancelledToolId = blocks.lastOrNull { it.kind == "tool_use" && it.toolStatus == ToolBlockStatus.CANCELLED }?.id
