@@ -555,12 +555,13 @@ private fun liveStreamingDelta(
         // cadence. Do not sample this StateFlow again here: a second clock
         // can hold the final snapshot until the next scroll/layout pass,
         // which makes a completed reply appear stuck until the user swipes.
-        viewModel.streamingById
-            .map { overlay ->
-                overlay[messageId] ?: canonicalStreamingDelta(
-                    viewModel.messages.value.firstOrNull { it.id == messageId },
-                )
-            }
+        kotlinx.coroutines.flow.combine(viewModel.streamingById, viewModel.messages) { overlay, _ ->
+            // Read the canonical StateFlow value, not a lagging combine argument:
+            // terminal commit precedes overlay removal, and later edits must emit too.
+            overlay[messageId] ?: canonicalStreamingDelta(
+                viewModel.messages.value.firstOrNull { it.id == messageId },
+            )
+        }
     }
     val target by flow.collectAsState(initial = viewModel.streamingById.value[messageId]
         ?: canonicalStreamingDelta(viewModel.messages.value.firstOrNull { it.id == messageId }))
