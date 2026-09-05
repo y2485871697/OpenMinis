@@ -15,6 +15,7 @@ import com.openminis.app.data.model.hasImageInput
 import com.openminis.app.provider.thinking.ThinkingResolveContext
 import com.openminis.app.provider.thinking.ThinkingRuleResolver
 import com.openminis.app.provider.LLMProvider
+import com.openminis.app.provider.stream.SseEventReader
 import com.openminis.app.provider.applyUserAgentOverride
 import com.openminis.app.provider.safeOptString
 import kotlinx.coroutines.CancellationException
@@ -940,23 +941,12 @@ class OpenAIProvider private constructor(
 
         try {
             send(LLMStreamChunk.Started)
-            var line: String?
-
+    
             // Branch streaming parser based on API format
             val isResponsesAPI = !usesChatCompletionsAPI
 
-            while (reader.readLine().also { line = it } != null) {
-                val l = line ?: continue
-                // Tolerate `data:` with or without the optional space — the
-                // HTML5 SSE spec only treats one leading space as ignorable,
-                // and some OpenAI-compatible servers (e.g. China Telecom's
-                // eaichat.ctyun.cn deepseek-v4-oc endpoint) emit `data:{...}`
-                // with no space. Strict `data: ` matching dropped every
-                // chunk on those providers, surfacing as empty-stream errors.
-                if (!l.startsWith("data:")) continue
-                val payload = l.removePrefix("data:").let {
-                    if (it.startsWith(" ")) it.removePrefix(" ") else it
-                }
+            for (sseEvent in SseEventReader(reader)) {
+                val payload = sseEvent.data
                 if (payload == "[DONE]") {
                     // [T-android-think-prefix-stream] Flush whatever the parser
                     // still holds (a cross-chunk tag tail, or an unterminated
@@ -2702,19 +2692,8 @@ class OpenAIProvider private constructor(
             }
         }
 
-        var line: String?
-        while (reader.readLine().also { line = it } != null) {
-            val l = line ?: continue
-            // Tolerate both `data: {…}` and `data:{…}` (same as the chat path).
-            if (!l.startsWith("data:")) continue
-            val payload = l.removePrefix("data:").let { if (it.startsWith(" ")) it.removePrefix(" ") else it }
-            if (payload == "[DONE]") break
-
-            val event = try { JSONObject(payload) } catch (e: Exception) { continue }
-            when (event.optString("type")) {
-                "response.output_item.done" -> {
-                    event.optJSONObject("item")?.let { scanItem(it) }
-                }
+        for (sseEvent in SseEventReader(reader)) {
+                val payload = sseEvent.data
                 "response.output_text.done", "response.output_text.delta" -> {
                     event.optString("text").takeIf { it.isNotEmpty() }?.let { refusalText = it }
                         ?: event.optString("delta").takeIf { it.isNotEmpty() }
