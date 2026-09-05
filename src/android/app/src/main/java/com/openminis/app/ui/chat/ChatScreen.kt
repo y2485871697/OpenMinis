@@ -483,12 +483,15 @@ private fun sameStreamingLayout(
         if (oldDelta.isAwaitingModelResponse != newDelta.isAwaitingModelResponse) return false
         if (oldDelta.content.isEmpty() != newDelta.content.isEmpty()) return false
         if (oldDelta.contentStructureKey != newDelta.contentStructureKey) return false
-        // Tool blocks are append-only within a streamed assistant turn. Status and
-        // argument/content changes are rendered by the row's side-channel subscriber;
-        // only a new/removed block can change the LazyColumn structure. Scanning all
-        // 900+ historical tool blocks on every 50ms snapshot was a measurable CPU
-        // and allocation multiplier on long agent sessions.
         if (oldDelta.toolBlocks.size != newDelta.toolBlocks.size) return false
+        for (index in oldDelta.toolBlocks.indices) {
+            val oldBlock = oldDelta.toolBlocks[index]
+            val newBlock = newDelta.toolBlocks[index]
+            if (oldBlock.id != newBlock.id ||
+                oldBlock.kind != newBlock.kind ||
+                oldBlock.toolStatus != newBlock.toolStatus
+            ) return false
+        }
     }
     return true
 }
@@ -3753,27 +3756,7 @@ fun ChatScreen(
                 // pin to once per new row across flatten publishes.
                 var lastTrailingPinKey by remember(sessionId) { mutableStateOf<String?>(null) }
                 LaunchedEffect(flatItems) {
-                                         // The final canonical-message handoff can publish a new
-                     // flatItems list after the stream-end settle timer already
-                     // ran. Wait for that list's first layout frame, then restore
-                     // the bottom once more if the user was following the reply.
-                     // Without this handoff pin, the final text/table height can
-                     // remain stale until a manual up/down gesture triggers a
-                     // LazyColumn remeasure.
-                     val sinceStreamEnd = System.currentTimeMillis() - lastStreamEndMs
-                     if (!viewModel.isStreaming.value &&
-                         lastStreamEndMs > 0L &&
-                         sinceStreamEnd in 0..STREAM_END_ARM_GRACE_MS &&
-                         !userScrolledAway &&
-                         !listState.isScrollInProgress &&
-                         !isNearBottom.value
-                     ) {
-                         withFrameNanos { }
-                         if (!userScrolledAway && !listState.isScrollInProgress) {
-                             tracedScrollToItem("flatItems/stream-end-repin", 0, 0)
-                         }
-                         return@LaunchedEffect
-                     }`r`n                     // Pin once per new trailing tool/typing row, key-deduped,
+                    // Pin once per new trailing tool/typing row, key-deduped,
                     // not on every flatten publish, so streaming tool-arg
                     // ticks don't fight the user. flatItems is oldest-first
                     // (rendered via asReversed()), so the newest row is at

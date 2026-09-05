@@ -343,7 +343,7 @@ internal sealed class FlatChatItem {
                 // of rebuilding the whole markdown subtree for every SSE
                 // snapshot. Once frozen, compare the canonical markdown so
                 // edits/restored messages still invalidate normally.
-                (isStreaming || messageMarkdown == other.messageMarkdown)
+                (isStreaming || (block == other.block && messageMarkdown == other.messageMarkdown))
         }
         override fun hashCode(): Int {
             var h = messageId.hashCode()
@@ -391,8 +391,8 @@ internal sealed class FlatChatItem {
                 blockIndex == other.blockIndex &&
                 isLastBlockOfMessage == other.isLastBlockOfMessage &&
                 messageIsStreaming == other.messageIsStreaming &&
-                rawText.length == other.rawText.length &&
-                messageMarkdown.length == other.messageMarkdown.length
+                rawText == other.rawText &&
+                messageMarkdown == other.messageMarkdown
         }
         override fun hashCode(): Int {
             var h = messageId.hashCode()
@@ -495,8 +495,8 @@ internal sealed class FlatChatItem {
             if (other !is AssistantLegacyContent) return false
             return messageId == other.messageId &&
                 isStreaming == other.isStreaming &&
-                content.length == other.content.length &&
-                messageMarkdown.length == other.messageMarkdown.length
+                content == other.content &&
+                messageMarkdown == other.messageMarkdown
         }
         override fun hashCode(): Int {
             var h = messageId.hashCode()

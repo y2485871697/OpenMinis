@@ -659,66 +659,16 @@ class ChatViewModel(
     private val _streamingById = MutableStateFlow<Map<String, StreamingDelta>>(emptyMap())
     val streamingById: StateFlow<Map<String, StreamingDelta>> = _streamingById.asStateFlow()
 
-    // RikkaHub separates provider events from UI publication. Keep only the
-    // newest immutable snapshot per assistant and publish it on a 50ms UI
-    // boundary; this prevents a fast SSE connection from enqueueing hundreds
-    // of Compose invalidations while preserving the latest text.
-    private val streamingPublishScope = kotlinx.coroutines.CoroutineScope(
-        // Provider bursts must not queue delayed publication work behind
-        // Compose measurement/layout on the main thread. StateFlow updates
-        // are thread-safe; keep the coalescing clock off-main and let the
-        // renderer observe the latest immutable snapshot normally.
-        SupervisorJob() + Dispatchers.Default,
-    )
-    private val streamingPublishLock = Any()
-    private val pendingStreamingSnapshots = mutableMapOf<String, StreamingDelta>()
-    private val streamingPublishJobs = mutableMapOf<String, Job>()
+    private val streamingSnapshots = StreamingSnapshotStore(_streamingById, viewModelScope)
 
-    private fun enqueueStreamingSnapshot(id: String, snapshot: StreamingDelta) {
-        synchronized(streamingPublishLock) {
-            pendingStreamingSnapshots[id] = snapshot
-            if (streamingPublishJobs[id]?.isActive == true) return
-            streamingPublishJobs[id] = streamingPublishScope.launch {
-                kotlinx.coroutines.delay(50L)
-                val latest = synchronized(streamingPublishLock) {
-                    pendingStreamingSnapshots.remove(id).also {
-                        streamingPublishJobs.remove(id)
-                    }
-                } ?: return@launch
-                _streamingById.update { current -> current + (id to latest) }
-            }
-        }
-    }
+    private fun enqueueStreamingSnapshot(id: String, snapshot: StreamingDelta) =
+        streamingSnapshots.enqueue(id, snapshot)
 
-    private fun flushPendingStreamingSnapshot(id: String) {
-        val latest = synchronized(streamingPublishLock) {
-            streamingPublishJobs.remove(id)?.cancel()
-            pendingStreamingSnapshots.remove(id)
-        } ?: return
-        _streamingById.update { current -> current + (id to latest) }
-    }
+    private fun clearStreamFlushState(id: String) = streamingSnapshots.clear(id)
 
-    private fun clearPendingStreamingSnapshot(id: String) {
-        synchronized(streamingPublishLock) {
-            streamingPublishJobs.remove(id)?.cancel()
-            pendingStreamingSnapshots.remove(id)
-        }
-    }
+    private fun clearAllStreamFlushStates() = streamingSnapshots.clearAll()
 
-    /** Drop a message's live snapshot on termination. */
-    private fun clearStreamFlushState(id: String) {
-        clearPendingStreamingSnapshot(id)
-        _streamingById.value = _streamingById.value - id
-    }
-
-    private fun clearAllStreamFlushStates() {
-        _streamingById.value = emptyMap()
-    }
-
-    /** Drop live snapshots for any message id NOT in [keptIds] (retry/truncate). */
-    private fun retainStreamFlushStates(keptIds: Set<String>) {
-        _streamingById.value = _streamingById.value.filterKeys { it in keptIds }
-    }
+    private fun retainStreamFlushStates(keptIds: Set<String>) = streamingSnapshots.retain(keptIds)
 
     /**
      * Composer draft. Owned by VM so it survives navigation (e.g. push EnvVars
@@ -10081,45 +10031,28 @@ class ChatViewModel(
             }
             return
         }
-        // Publish the terminal snapshot first, but keep the canonical row in
-        // its streaming state for one short render handoff window. Clearing
-        // the overlay in the same frame as writing the complete response lets
-        // Compose switch straight to the full canonical Markdown tree before
-        // the live renderer has painted its final snapshot (the visible
-        // "stalls, then everything appears" failure on fast models/tables).
-        val current = _messages.value
-        val idx = current.indexOfLast { it.id == id }
-        if (idx < 0) {
-            clearStreamFlushState(id)
-            return
-        }
-        val updated = current.toMutableList()
-        updated[idx] = current[idx].copy(
+        val final = StreamingDelta(
             content = content,
-            isStreaming = true,
             toolBlocks = toolBlocks.toList(),
             isAwaitingModelResponse = isAwaitingModelResponse,
+            contentStructureKey = streamingContentStructureKey(content),
         )
-        _messages.value = updated
-        enqueueStreamingSnapshot(
-            id,
-            StreamingDelta(
-                content = content,
-                toolBlocks = toolBlocks.toList(),
-                isAwaitingModelResponse = isAwaitingModelResponse,
-                contentStructureKey = streamingContentStructureKey(content),
-            ),
-        )
-        streamingPublishScope.launch {
-            delay(350L)
-            val latest = _messages.value
-            val latestIdx = latest.indexOfLast { it.id == id }
-            if (latestIdx >= 0 && latest[latestIdx].content == content && latest[latestIdx].isStreaming) {
-                val settled = latest.toMutableList()
-                settled[latestIdx] = settled[latestIdx].copy(isStreaming = false)
-                _messages.value = settled
+        streamingSnapshots.finish(id, final) { snapshot ->
+            commitStreamingSnapshot(id, snapshot)
+        }
+    }
+
+    private fun commitStreamingSnapshot(id: String, snapshot: StreamingDelta) {
+        _messages.update { current ->
+            val index = current.indexOfLast { it.id == id }
+            if (index < 0) current else current.toMutableList().apply {
+                this[index] = current[index].copy(
+                    content = snapshot.content,
+                    toolBlocks = snapshot.toolBlocks,
+                    isStreaming = false,
+                    isAwaitingModelResponse = snapshot.isAwaitingModelResponse,
+                )
             }
-            clearStreamFlushState(id)
         }
     }
 
@@ -10130,7 +10063,7 @@ class ChatViewModel(
      * snapshots) without forcing the render layer to consult the delta map.
      */
     internal fun effectiveContent(id: String): String? {
-        val delta = _streamingById.value[id]
+        val delta = streamingSnapshots.peek(id)
         if (delta != null) return delta.content
         return _messages.value.firstOrNull { it.id == id }?.content
     }
@@ -10143,45 +10076,24 @@ class ChatViewModel(
      * [updateAssistantMessage] call had isStreaming=true.
      */
     private fun flushStreamingDelta(id: String) {
-        flushPendingStreamingSnapshot(id)
-        val delta = _streamingById.value[id]
-        if (delta == null) return
-        val current = _messages.value
-        val idx = current.indexOfLast { it.id == id }
-        if (idx >= 0) {
-            val updated = current.toMutableList()
-            updated[idx] = current[idx].copy(
-                content = delta.content,
-                isStreaming = false,
-                toolBlocks = delta.toolBlocks,
-                isAwaitingModelResponse = delta.isAwaitingModelResponse,
-            )
-            _messages.value = updated
-        }
-        clearStreamFlushState(id)
-        _streamingById.value = _streamingById.value - id
+        streamingSnapshots.drain(id) { commitStreamingSnapshot(id, it) }
     }
 
-    /** Drain ALL outstanding streaming deltas (called on global resets). */
+    /** Include not-yet-published deltas; a 50ms UI batch must never lose its tail. */
     private fun flushAllStreamingDeltas() {
-        val pending = _streamingById.value
-        if (pending.isEmpty()) return
-        val current = _messages.value.toMutableList()
-        var changed = false
-        for (id in pending.keys) {
-            val idx = current.indexOfLast { it.id == id }
-            if (idx < 0) continue
-            val complete = pending[id] ?: continue
-            current[idx] = current[idx].copy(
-                content = complete.content,
-                isStreaming = false,
-                toolBlocks = complete.toolBlocks,
-                isAwaitingModelResponse = complete.isAwaitingModelResponse,
-            )
-            changed = true
+        streamingSnapshots.drainAll { latest ->
+            _messages.update { current ->
+                current.map { message ->
+                    val snapshot = latest[message.id]
+                    if (snapshot == null) message else message.copy(
+                        content = snapshot.content,
+                        toolBlocks = snapshot.toolBlocks,
+                        isStreaming = false,
+                        isAwaitingModelResponse = snapshot.isAwaitingModelResponse,
+                    )
+                }
+            }
         }
-        if (changed) _messages.value = current
-        _streamingById.value = emptyMap()
     }
 
     /**
@@ -10192,9 +10104,7 @@ class ChatViewModel(
      * exception/cancellation tail for send, retry, rerun, resume and queue drain.
      */
     private suspend fun drainStreamingSideChannelAfterLoop() {
-        // The live map already contains the complete merged message after the
-        // provider's final event. Keep this cleanup only for cancellation,
-        // errors and legacy races; normal chunks are published immediately.
+        // Drain accepted deltas even if the UI publication timer has not fired.
         withContext(NonCancellable + Dispatchers.Main) {
             flushAllStreamingDeltas()
         }

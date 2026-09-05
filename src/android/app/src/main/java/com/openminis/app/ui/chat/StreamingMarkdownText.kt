@@ -536,62 +536,56 @@ fun StreamingMarkdownText(
 ) {
     if (shardId != null) {
         androidx.compose.runtime.CompositionLocalProvider(LocalShardId provides shardId) {
-            StreamingMarkdownTextBody(content, modifier)
+            StreamingMarkdownTextBody(content, isStreaming, modifier)
         }
         return
     }
-    StreamingMarkdownTextBody(content, modifier)
+    StreamingMarkdownTextBody(content, isStreaming, modifier)
+}
+
+@Composable
+private fun rememberParsedMarkdown(content: String, isStreaming: Boolean): List<MdBlock> {
+    val latestContent by rememberUpdatedState(content)
+    val colors = currentMdColors()
+    var blocks by remember { mutableStateOf<List<MdBlock>>(emptyList()) }
+    // Completion restarts the collector with the exact final input. A previous
+    // sampled prefix or failed parse must not remain visible until row recycling.
+    LaunchedEffect(colors, isStreaming) {
+        val nodeBuffer = StreamingMarkdownNodeBuffer()
+        snapshotFlow { latestContent }
+            .distinctUntilChanged()
+            .conflate()
+            .map { snapshot ->
+                try {
+                    if (isStreaming) {
+                        parseStreamingMarkdownBlocks(snapshot, colors, nodeBuffer.update(snapshot))
+                    } else {
+                        MarkdownParseCaches.blocks(snapshot).also {
+                            MarkdownParseCaches.prewarm(it, colors)
+                        }
+                    }
+                } catch (error: Exception) {
+                    if (error is kotlinx.coroutines.CancellationException) throw error
+                    com.openminis.app.logging.AppLogger.warning(
+                        "Markdown", "snapshot parse failed chars=${snapshot.length}: ${error.message}",
+                    )
+                    // Keep collecting newer snapshots after a malformed prefix.
+                    listOf(MdBlock.CodeBlock(snapshot, "", snapshot))
+                }
+            }
+            .flowOn(Dispatchers.Default)
+            .collect { blocks = it }
+    }
+    return blocks
 }
 
 @Composable
 private fun StreamingMarkdownTextBody(
     content: String,
+    isStreaming: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    // Keep one stable collector for the lifetime of this composable and keep
-    // rendering the last complete AST until the newest one is ready. Markdown
-    // parsing is slower than some providers, so retain only the latest waiting
-    // snapshot instead of building an unbounded queue of obsolete prefixes.
-    val latestContent by rememberUpdatedState(content)
-    val mdColors = currentMdColors()
-    val nodeBuffer = remember { StreamingMarkdownNodeBuffer() }
-    // Do not synchronously parse the whole assistant reply during
-    // composition. A runBlocking parse here stalls the main thread exactly
-    // when a new stream fragment mounts, so deltas accumulate and then appear
-    // in a burst. snapshotFlow emits the current value immediately; the first
-    // parse still happens without blocking the UI thread.
-    var blocks by remember {
-        // [T-android-stream-arrival-pace] RikkaHub parses the FIRST snapshot
-        // synchronously in the initial composition state, so a live row never
-        // opens as a raw-markdown preview before the async pipeline lands.
-        mutableStateOf(
-            if (content.length <= COLD_PARSE_SYNC_CHARS && content.isNotBlank()) {
-                MarkdownParseCaches.blocks(content)
-            } else {
-                emptyList()
-            }
-        )
-    }
-    LaunchedEffect(mdColors) {
-        snapshotFlow { latestContent }
-            .distinctUntilChanged()
-            // RikkaHub's UI observes a bounded cadence. Conflation placed
-            // before the expensive Markdown parse could leave a fast-model
-            // table waiting behind one long parse and only repaint at finish.
-            .sample(50L)
-            .map { snapshot ->
-                parseStreamingMarkdownBlocks(snapshot, mdColors, nodeBuffer.update(snapshot))
-            }
-            .flowOn(Dispatchers.Default)
-            .catch { error ->
-                if (error is kotlinx.coroutines.CancellationException) throw error
-                com.openminis.app.logging.AppLogger.warning(
-                    "Markdown",
-                    "stream parse failed: ${error.message}",
-                )
-            }
-            .collect { blocks = it }
-    }
+    val blocks = rememberParsedMarkdown(content, isStreaming)
 
     ShardSubIndexScope {
         Column(modifier = modifier) {
@@ -859,102 +853,13 @@ private fun MarkdownBlockBody(
     isStreaming: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    // For frozen blocks, parse once per distinct fragment text PROCESS-WIDE
-    // ([MarkdownParseCaches.blocks]) — scroll-away/return and session re-entry
-    // are cache hits instead of fresh main-thread parses. remember() keeps the
-    // per-composition lookup free.
-    //
-    // [T-android-coldload-offmain-parse] Cold-load split: a cache HIT (or a
-    // small fragment) still renders synchronously — no flicker on
-    // scroll-back / re-entry, and small parses are sub-ms. A cache MISS on a
-    // BIG fragment must NOT parse in composition: on session open the
-    // viewport's fragments all miss at once and the synchronous
-    // parseMarkdownBlocksBlocking + inline scans froze the main thread for
-    // seconds (tester log: 3.5–8.5s on a 33K-char message; the streaming
-    // breaker/degrade only cover isStreaming=true). Those parse off-main
-    // with a bounded plain-text preview in the meantime — same structure as
-    // the live branch below.
-    if (!isStreaming) {
-        val cached = remember(rawText) { MarkdownParseCaches.cachedBlocks(rawText) }
-        // [T-android-longtext-anr] Synchronous render ONLY on a real cache HIT.
-        // The old `|| rawText.length <= COLD_PARSE_OFFMAIN_THRESHOLD_CHARS` clause
-        // let a small fragment parse (block-split + per-block inline regex) on the
-        // main thread during composition. Individually sub-ms, but on session open
-        // the first screen holds ~20 messages split into dozens of small fragments;
-        // when the parallel viewport prewarm (ChatScreen) loses the race, every one
-        // of those misses parsed synchronously in the same frame and the aggregate
-        // froze the main thread for 30s+ → ANR (minis-2026-07-09-anr.log: all hang
-        // stacks in Matcher/Pattern via the inline parser, right after first compose).
-        // A cold MISS now always goes off-main with a plain-text preview, bounding
-        // the first-frame main-thread cost to cheap Text layouts regardless of how
-        // many fragments miss at once. Cache HITs (scroll-back, re-entry, prewarmed
-        // rows) stay synchronous and flicker-free.
-        if (cached != null) {
-            Column(modifier = modifier) {
-                cached.forEach { RenderBlock(it) }
-            }
-            return
-        }
-        // [T-android-stream-end-raw-flash] Small frozen fragments parse
-        // SYNCHRONOUSLY on a cache miss. The off-main path below shows a
-        // raw-markdown Text preview for one to several frames before the
-        // parsed blocks swap in — at stream end / next-turn start the flat
-        // rows re-key from the live fragment set to the coalesced set, EVERY
-        // row misses at once, and the user sees the reply flash as raw
-        // `##`/`**`/`|---|` text over the parsed tables (2026-09-05
-        // recordings). A ≤16 KB fragment is a low-single-digit-ms job for the
-        // line-based block splitter (inline scanning deliberately NOT done
-        // here — that was the 2026-07-09 ANR path; inline caches fill
-        // lazily for the visible viewport instead). Pay it once per distinct
-        // fragment (then cached) rather than flashing raw text.
-        if (rawText.length <= COLD_PARSE_SYNC_CHARS) {
-            val parsedSync = remember(rawText) { MarkdownParseCaches.blocks(rawText) }
-            Column(modifier = modifier) {
-                parsedSync.forEach { RenderBlock(it) }
-            }
-            return
-        }
-        val mdColors = currentMdColors()
-        var parsed by remember(rawText) { mutableStateOf<List<MdBlock>?>(null) }
-        LaunchedEffect(rawText) {
-            val tStartNs = System.nanoTime()
-            val computed = withContext(Dispatchers.Default) {
-                MarkdownParseCaches.blocks(rawText).also {
-                    MarkdownParseCaches.prewarm(it, mdColors)
-                }
-            }
-            coroutineContext.ensureActive()
-            parsed = computed
-            com.openminis.app.logging.AppLogger.info(
-                "Perf",
-                "[Perf][ColdParse] step=coldParse.offmain chars=${rawText.length} " +
-                    "blocks=${computed.size} parseMs=${(System.nanoTime() - tStartNs) / 1_000_000}",
-            )
-        }
-        val blocks = parsed
-        Column(modifier = modifier) {
-            if (blocks == null) {
-                // Bounded plain-text preview while the off-main parse runs —
-                // one cheap Text layout, no markdown/regex/AnnotatedString.
-                Text(
-                    text = rawText.take(COLD_PARSE_PREVIEW_CHARS),
-                    fontSize = BaseFontSize,
-                    lineHeight = BaseLineHeight,
-                    color = currentMdColors().text,
-                )
-            } else {
-                blocks.forEach { RenderBlock(it) }
-            }
-        }
-        return
-    }
     // [T-android-live-block-degrade] B-lite: a LIVE fragment that has grown
     // huge is almost always an unsplittable single block (the splitter keeps
     // tables/fences whole — exactly the MiniMax giant-table ANR load). Parsing
     // it in full on every publish is O(fragment) with no upper bound, so over
     // the threshold render a bounded plain-text tail instead and do the full
     // parse ONCE when the fragment freezes (isStreaming flips false above).
-    if (rawText.length > LIVE_FRAGMENT_DEGRADE_CHARS) {
+    if (isStreaming && rawText.length > LIVE_FRAGMENT_DEGRADE_CHARS) {
         Column(modifier = modifier) {
             Text(
                 text = stringResource(R.string.chat_stream_degraded_notice),
@@ -970,45 +875,7 @@ private fun MarkdownBlockBody(
         }
         return
     }
-    // Keep the old parsed blocks mounted while the newest snapshot parses on
-    // Default. At most one parse runs and one newest snapshot waits; obsolete
-    // prefixes must not accumulate behind the parser.
-    val latestText by rememberUpdatedState(rawText)
-    val mdColors = currentMdColors()
-    val nodeBuffer = remember { StreamingMarkdownNodeBuffer() }
-    // The live fragment is mounted from the LazyColumn composition path. A
-    // runBlocking parse here stalls the main thread and lets provider deltas
-    // pile up before Compose can draw them. Start empty and let the initial
-    // snapshotFlow emission populate it on Dispatchers.Default.
-    var blocks by remember {
-        // [T-android-stream-arrival-pace] Same first-frame parity as
-        // [StreamingMarkdownTextBody]: parse the initial snapshot inline so
-        // the live fragment never opens as a raw-text preview.
-        mutableStateOf(
-            if (rawText.length <= COLD_PARSE_SYNC_CHARS && rawText.isNotBlank()) {
-                MarkdownParseCaches.blocks(rawText)
-            } else {
-                emptyList()
-            }
-        )
-    }
-    LaunchedEffect(mdColors) {
-        snapshotFlow { latestText }
-            .distinctUntilChanged()
-            .sample(50L)
-            .map { snapshot ->
-                parseStreamingMarkdownBlocks(snapshot, mdColors, nodeBuffer.update(snapshot))
-            }
-            .flowOn(Dispatchers.Default)
-            .catch { error ->
-                if (error is kotlinx.coroutines.CancellationException) throw error
-                com.openminis.app.logging.AppLogger.warning(
-                    "Markdown",
-                    "live block parse failed: ${error.message}",
-                )
-            }
-            .collect { blocks = it }
-    }
+    val blocks = rememberParsedMarkdown(rawText, isStreaming)
     Column(modifier = modifier) {
         if (blocks.isEmpty() && rawText.isNotBlank()) {
             Text(
@@ -1039,15 +906,6 @@ private const val LIVE_FRAGMENT_TAIL_CHARS = 3_000
  * is sub-ms and the placeholder swap would flicker for nothing.
  */
 private const val COLD_PARSE_PREVIEW_CHARS = 4_000
-
-/**
- * [T-android-stream-end-raw-flash] Frozen fragments at or below this size
- * parse synchronously in composition on a cache miss (see the frozen branch
- * in [MarkdownBlockBody]). Deliberately far below the sizes where the block
- * splitter's cost becomes frame-visible, and far above any coalesced fragment
- * `coalesceMarkdownFragments` produces at its default 2000-char budget.
- */
-private const val COLD_PARSE_SYNC_CHARS = 16_000
 
 /**
  * [T-android-coldload-offmain-parse] Composition-snapshot prewarmer for the
@@ -3355,7 +3213,13 @@ private object MarkdownParseCaches {
      * the incremental path in RenderBlock).
      */
     fun prewarmLiveTail(blocks: List<MdBlock>, colors: MdColors) {
-        val last = blocks.lastOrNull() as? MdBlock.Paragraph ?: return
+        val tail = blocks.lastOrNull() ?: return
+        prewarm(blocks.dropLast(1), colors)
+        if (tail !is MdBlock.Paragraph) {
+            prewarm(listOf(tail), colors)
+            return
+        }
+        val last = tail
         // inlineIncremental/mathLatexIncremental internally split at the safe
         // boundary and reuse inline(prefix)/mathLatex(prefix). Computing them
         // here (off-main) both warms the prefix AND memoizes the exact full-text
