@@ -135,14 +135,31 @@ fun StandardChatSheetHeader(
         } else {
             Spacer(modifier = Modifier.size(48.dp))
         }
-        Spacer(modifier = Modifier.weight(1f))
-        Text(
-            text = title,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = ChatColors.primaryText,
-        )
-        Spacer(modifier = Modifier.weight(1f))
+        Column(
+            modifier = Modifier.weight(1f),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = title,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = ChatColors.primaryText,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                maxLines = 2,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+            if (!subtitle.isNullOrBlank()) {
+                Text(
+                    text = subtitle,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = ChatColors.secondaryText,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
         IconButton(onClick = onDismiss) {
             Icon(
                 imageVector = Icons.Default.Close,
@@ -151,14 +168,5 @@ fun StandardChatSheetHeader(
             )
         }
     }
-    if (!subtitle.isNullOrBlank()) {
-        Text(
-            text = subtitle,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Medium,
-            color = ChatColors.secondaryText,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
-        )
-    }
+
 }

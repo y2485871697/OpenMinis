@@ -2005,4 +2005,8 @@
     <string name="minis_compact_revert_confirm">Revert</string>
     <string name="minis_compact_show_summary">Show full summary</string>
     <string name="minis_compact_copy">Copy summary</string>
+    <string name="appearance_section_read_aloud">Read aloud</string>
+    <string name="appearance_auto_close_read_aloud_capsule">Close floating player after reading</string>
+    <string name="appearance_auto_close_read_aloud_capsule_subtitle">Hide the floating player when reading ends. Turn off to keep it until manually closed.</string>
+    <string name="appearance_show_provider_balance_subtitle">Show the current provider balance beside the top-right chat menu. Requires balance lookup configured for the provider.</string>
 </resources>

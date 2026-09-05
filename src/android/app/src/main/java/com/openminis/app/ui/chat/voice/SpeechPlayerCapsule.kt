@@ -33,6 +33,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -50,6 +51,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.openminis.app.speech.VoiceOutputState
+import com.openminis.app.ui.settings.getAppearancePrefs
+import com.openminis.app.ui.settings.KEY_AUTO_CLOSE_READ_ALOUD_CAPSULE
 import kotlin.math.roundToInt
 
 /** Compact, draggable controller shared by manual and automatic read-aloud. */
@@ -60,6 +63,20 @@ fun SpeechPlayerCapsule(
     additionalObstructionDp: androidx.compose.ui.unit.Dp = 0.dp,
 ) {
     val context = LocalContext.current
+    val appearancePrefs = remember(context) { getAppearancePrefs(context) }
+    var autoClose by remember(appearancePrefs) {
+        mutableStateOf(appearancePrefs.getBoolean(KEY_AUTO_CLOSE_READ_ALOUD_CAPSULE, true))
+    }
+    DisposableEffect(appearancePrefs) {
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
+            if (key == null || key == KEY_AUTO_CLOSE_READ_ALOUD_CAPSULE) {
+                autoClose = prefs.getBoolean(KEY_AUTO_CLOSE_READ_ALOUD_CAPSULE, true)
+            }
+        }
+        appearancePrefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { appearancePrefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+    val enabled by VoiceOutputState.isEnabled.collectAsState()
     LaunchedEffect(Unit) { VoiceOutputState.init(context) }
     val globalSpeaking by VoiceOutputState.isSpeaking.collectAsState()
     val speed by VoiceOutputState.speed.collectAsState()
@@ -73,7 +90,11 @@ fun SpeechPlayerCapsule(
     val synthesizing by (activePlayer?.isSynthesizing ?: idleBoolean).collectAsState()
     val playbackProgress by (activePlayer?.playbackProgress ?: idleFloat).collectAsState()
 
-    if (!globalSpeaking && !playerSpeaking && !paused && !synthesizing) return
+    val hasPlayback = globalSpeaking || playerSpeaking || paused || synthesizing
+    var wasVisible by remember { mutableStateOf(false) }
+    val visible = speechCapsuleVisible(enabled, hasPlayback, wasVisible, autoClose)
+    LaunchedEffect(visible) { wasVisible = visible }
+    if (!visible) return
 
     var expanded by remember { mutableStateOf(false) }
     val capsuleWidth by animateDpAsState(
@@ -155,6 +176,7 @@ fun SpeechPlayerCapsule(
                 ) {
                     FilledTonalIconButton(
                         modifier = Modifier.size(40.dp),
+                        enabled = activePlayer != null && hasPlayback,
                         onClick = {
                             if (paused) activePlayer?.resume() else activePlayer?.pause()
                         },
@@ -172,7 +194,10 @@ fun SpeechPlayerCapsule(
 
                     IconButton(
                         modifier = Modifier.size(36.dp),
-                        onClick = { VoiceOutputState.setEnabled(false) },
+                        onClick = {
+                            wasVisible = false
+                            VoiceOutputState.setEnabled(false)
+                        },
                     ) {
                         Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(19.dp))
                     }
@@ -188,6 +213,7 @@ fun SpeechPlayerCapsule(
                             IconButton(
                                 modifier = Modifier.size(36.dp),
                                 onClick = { activePlayer?.fastForward(5_000) },
+                                enabled = activePlayer != null && hasPlayback,
                             ) {
                                 Icon(Icons.Default.FastForward, contentDescription = null, modifier = Modifier.size(19.dp))
                             }
@@ -206,7 +232,7 @@ fun SpeechPlayerCapsule(
                     }
                 }
 
-                val safeProgress = if (playbackProgress.isFinite()) {
+                val safeProgress = if (!hasPlayback) 1f else if (playbackProgress.isFinite()) {
                     playbackProgress.coerceIn(0f, 1f)
                 } else {
                     0f

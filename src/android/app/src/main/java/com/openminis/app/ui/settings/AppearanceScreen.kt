@@ -33,6 +33,7 @@ import androidx.compose.material.icons.automirrored.outlined.KeyboardReturn
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.outlined.AccountBalanceWallet
+import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.BrightnessAuto
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
@@ -96,6 +97,7 @@ const val KEY_AUTO_FOCUS_AFTER_REPLY = "chat.autoFocusAfterReply"  // Boolean, d
 // sync reads the same value.
 const val KEY_SHOW_CHAT_TITLE = "appearance.show_chat_title"  // Boolean, default true
 const val KEY_SHOW_PROVIDER_BALANCE = "appearance.show_provider_balance"  // Boolean, default true
+const val KEY_AUTO_CLOSE_READ_ALOUD_CAPSULE = "appearance.auto_close_read_aloud_capsule"  // Boolean, default true
 // [T-thinking-auto-expand-toggle] When true (default, historical behavior) a
 // NEW streaming thinking block auto-expands while the model reasons; when false
 // it stays collapsed until tapped. Key name mirrors iOS
@@ -270,6 +272,7 @@ fun AppearanceScreen(
     var streamingHaptics by remember { mutableStateOf(prefs.getBoolean(KEY_STREAMING_HAPTICS, true)) }
     var showChatTitle by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_CHAT_TITLE, true)) }
     var showProviderBalance by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_PROVIDER_BALANCE, true)) }
+    var autoCloseReadAloudCapsule by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_CLOSE_READ_ALOUD_CAPSULE, true)) }
     var autoGrouping by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_GROUPING, true)) }
     var chatInputLevel by remember { mutableIntStateOf(prefs.getInt(KEY_FONT_CHAT_INPUT, 0)) }
     var messageLevel by remember { mutableIntStateOf(prefs.getInt(KEY_FONT_MESSAGE, 0)) }
@@ -508,10 +511,28 @@ fun AppearanceScreen(
                 icon = Icons.Outlined.AccountBalanceWallet,
                 iconColor = tileBlue,
                 title = stringResource(R.string.appearance_show_provider_balance),
+                subtitle = stringResource(R.string.appearance_show_provider_balance_subtitle),
                 checked = showProviderBalance,
                 onCheckedChange = {
                     showProviderBalance = it
                     prefs.edit().putBoolean(KEY_SHOW_PROVIDER_BALANCE, it).apply()
+                },
+                showDivider = false,
+            )
+        }
+
+        SettingsSection(
+            header = stringResource(R.string.appearance_section_read_aloud),
+        ) {
+            SettingsSwitchRow(
+                icon = Icons.AutoMirrored.Outlined.VolumeUp,
+                iconColor = tileBlue,
+                title = stringResource(R.string.appearance_auto_close_read_aloud_capsule),
+                subtitle = stringResource(R.string.appearance_auto_close_read_aloud_capsule_subtitle),
+                checked = autoCloseReadAloudCapsule,
+                onCheckedChange = {
+                    autoCloseReadAloudCapsule = it
+                    prefs.edit().putBoolean(KEY_AUTO_CLOSE_READ_ALOUD_CAPSULE, it).apply()
                 },
                 showDivider = false,
             )

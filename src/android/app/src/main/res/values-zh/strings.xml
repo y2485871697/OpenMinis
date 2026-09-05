@@ -1832,4 +1832,8 @@
     <string name="minis_compact_revert_confirm">撤销</string>
     <string name="minis_compact_show_summary">查看完整摘要</string>
     <string name="minis_compact_copy">复制摘要</string>
+    <string name="appearance_section_read_aloud">朗读</string>
+    <string name="appearance_auto_close_read_aloud_capsule">朗读后自动关闭悬浮窗</string>
+    <string name="appearance_auto_close_read_aloud_capsule_subtitle">朗读结束后隐藏播放悬浮窗；关闭此选项后保留，直到手动关闭。</string>
+    <string name="appearance_show_provider_balance_subtitle">在聊天页右上角菜单左侧显示当前提供商余额，需要为该提供商配置余额查询。</string>
 </resources>

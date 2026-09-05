@@ -1782,4 +1782,8 @@
     <string name="minis_compact_revert_confirm">復原</string>
     <string name="minis_compact_show_summary">查看完整摘要</string>
     <string name="minis_compact_copy">複製摘要</string>
+    <string name="appearance_section_read_aloud">朗讀</string>
+    <string name="appearance_auto_close_read_aloud_capsule">朗讀後自動關閉懸浮窗</string>
+    <string name="appearance_auto_close_read_aloud_capsule_subtitle">朗讀結束後隱藏播放懸浮窗；關閉此選項後保留，直到手動關閉。</string>
+    <string name="appearance_show_provider_balance_subtitle">在聊天頁右上角選單左側顯示目前提供商餘額，需要為該提供商設定餘額查詢。</string>
 </resources>
