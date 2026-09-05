@@ -2064,7 +2064,7 @@ fun ChatScreen(
         }
     }
     // Keyboard/layout changes must not clear an explicit history-reading pause.
-    // Keyboard/layout changes must not clear an explicit history-reading pause.
+    val imeBottomPx = WindowInsets.ime.getBottom(LocalDensity.current)
     // [T-android-tool-autoscroll] Start-of-turn edge from ViewModel: resume() /
     // retryLast() / retryFromMessage() / rerunFromToolBlock() emit Unit on
     // forceScrollToBottom because they don't append a new user-message row, so
