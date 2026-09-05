@@ -2181,11 +2181,20 @@ fun ChatScreen(
                 val settled = currentGestureLayout()
                 if (settled.shouldSettle) {
                     userDragAwaitingSettle = false
-                    val resumedAtBottom = settled.atBottom &&
-                        !manualDragLeftBottom && !viewModel.isStreaming.value
-                    userScrolledAway = !resumedAtBottom
-                    followCompletedStream = resumedAtBottom
-                    lastInterruptMs = if (resumedAtBottom) 0L else System.currentTimeMillis()
+                    // A user drag during an active response is a hard pause.
+                    // Do not infer resume from reverse-layout reporting index 0
+                    // or from a near-bottom settle; doing so re-enables the
+                    // follow loop and produces the observed snap/flicker.
+                    if (viewModel.isStreaming.value && manualDragLeftBottom) {
+                        userScrolledAway = true
+                        followCompletedStream = false
+                        lastInterruptMs = System.currentTimeMillis()
+                    } else {
+                        val resumedAtBottom = settled.atBottom && !manualDragLeftBottom
+                        userScrolledAway = !resumedAtBottom
+                        followCompletedStream = resumedAtBottom
+                        lastInterruptMs = if (resumedAtBottom) 0L else System.currentTimeMillis()
+                    }
                 }
             }
         }
