@@ -1814,4 +1814,6 @@
     <string name="message_translation_clear">清空翻译</string>
     <string name="message_branch_created">已创建分支：%1$s</string>
     <string name="message_branch_failed">无法创建分支</string>
+    <string name="appearance_section_provider_balance">提供商余额</string>
+    <string name="appearance_show_provider_balance">显示提供商余额</string>
 </resources>

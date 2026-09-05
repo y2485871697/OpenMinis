@@ -1987,4 +1987,6 @@
     <string name="message_translation_clear">Clear translation</string>
     <string name="message_branch_created">Branch created: %1$s</string>
     <string name="message_branch_failed">Could not create branch</string>
+    <string name="appearance_section_provider_balance">Provider balance</string>
+    <string name="appearance_show_provider_balance">Show provider balance</string>
 </resources>

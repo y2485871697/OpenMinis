@@ -2348,6 +2348,7 @@ fun ChatScreen(
     // T-chat-title-pill: live-toggled by Settings → Appearance and by
     // `minis-config set appearance.show_chat_title …`. Default ON.
     var showChatTitlePill by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_CHAT_TITLE, true)) }
+    var showProviderBalance by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_PROVIDER_BALANCE, true)) }
     // T-chat-title-pill-edit: state for the in-chat edit-title sheet (the
     // exact same SessionEditSheet hosted by the session list home screen,
     // reused via `internal` visibility — no duplicate UI). Populated by an
@@ -2360,6 +2361,7 @@ fun ChatScreen(
                 com.openminis.app.ui.settings.KEY_FONT_CHAT_INPUT -> chatInputLevel = sp.getInt(key, 0)
                 com.openminis.app.ui.settings.KEY_TOOL_PREVIEW -> toolPreviewEnabled = sp.getBoolean(key, true)
                 com.openminis.app.ui.settings.KEY_SHOW_CHAT_TITLE -> showChatTitlePill = sp.getBoolean(key, true)
+                com.openminis.app.ui.settings.KEY_SHOW_PROVIDER_BALANCE -> showProviderBalance = sp.getBoolean(key, true)
             }
         }
         appearancePrefs.registerOnSharedPreferenceChangeListener(listener)
@@ -2587,9 +2589,10 @@ fun ChatScreen(
         containerColor = ChatColors.background,
         contentWindowInsets = WindowInsets(0),
         topBar = {
+            val visibleBalanceValue = activeBalanceValue.takeIf { showProviderBalance }
             val balanceActionWidth = 72.dp
             // Match the action width on both sides so a full-width title stays pane-centered.
-            val sideActionWidth = 48.dp + if (activeBalanceValue != null) balanceActionWidth else 0.dp
+            val sideActionWidth = 48.dp + if (visibleBalanceValue != null) balanceActionWidth else 0.dp
             CenterAlignedTopAppBar(
                 title = {
                     // iOS-style centered layout: "Minis" + group row + provider·model row
@@ -2903,7 +2906,7 @@ fun ChatScreen(
                 },
                 actions = {
                     // iOS: "..." circle button → dropdown menu
-                    activeBalanceValue?.let { balance ->
+                    visibleBalanceValue?.let { balance ->
                         Box(
                             modifier = Modifier.width(balanceActionWidth).padding(end = 4.dp),
                             contentAlignment = Alignment.CenterEnd,

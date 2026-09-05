@@ -1764,4 +1764,6 @@
     <string name="chat_input_placeholder_hint_5">Minis 可以把 ↩︎ 鍵設為傳送或換行</string>
     <string name="compact_progress">正在壓縮… 已進行 %1$d 秒</string>
     <string name="compact_progress_split">正在壓縮… %1$d 秒 · 分段摘要中（%2$d/%3$d）</string>
+    <string name="appearance_section_provider_balance">提供商餘額</string>
+    <string name="appearance_show_provider_balance">顯示提供商餘額</string>
 </resources>

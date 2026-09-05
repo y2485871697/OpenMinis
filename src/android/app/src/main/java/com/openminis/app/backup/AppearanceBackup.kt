@@ -15,6 +15,7 @@ internal object AppearanceBackup {
         "tool_preview" to true,
         "chat.autoFocusAfterReply" to true,
         "appearance.show_chat_title" to true,
+        "appearance.show_provider_balance" to true,
         "chat.autoExpandThinking" to true,
         "chat.streamingHaptics" to true,
         "autoGroupingEnabled" to true,
