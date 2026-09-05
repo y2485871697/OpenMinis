@@ -459,11 +459,12 @@ internal sealed class FlatChatItem {
         override val contentType = "error"
     }
 
-    /** One action row per completed assistant reply, never per markdown shard. */
+    /** One stable footer per reply; reserve its space before actions are ready. */
     class AssistantActions(
         val messageId: String,
         val messageMarkdown: String,
         val retryUserMessageId: String?,
+        val isReady: Boolean = true,
     ) : FlatChatItem() {
         override val key = "actions:$messageId"
         override val contentType = "actions"
@@ -471,11 +472,12 @@ internal sealed class FlatChatItem {
             other is AssistantActions &&
                 messageId == other.messageId &&
                 messageMarkdown == other.messageMarkdown &&
-                retryUserMessageId == other.retryUserMessageId
+                retryUserMessageId == other.retryUserMessageId &&
+                isReady == other.isReady
 
         override fun hashCode(): Int =
-            ((messageId.hashCode() * 31) + messageMarkdown.length) * 31 +
-                (retryUserMessageId?.hashCode() ?: 0)
+            (((messageId.hashCode() * 31) + messageMarkdown.length) * 31 +
+                (retryUserMessageId?.hashCode() ?: 0)) * 31 + isReady.hashCode()
     }
 
     /**
@@ -605,6 +607,7 @@ internal fun buildFlatChatItems(
                 messageId = "${item.messageId}#$n",
                 messageMarkdown = item.messageMarkdown,
                 retryUserMessageId = item.retryUserMessageId,
+                isReady = item.isReady,
             )
             is FlatChatItem.AssistantLegacyContent -> FlatChatItem.AssistantLegacyContent(
                 messageId = "${item.messageId}#$n",
@@ -842,14 +845,17 @@ internal fun buildFlatChatItems(
             out.add(dedupe(FlatChatItem.AssistantError(message.id, it)))
         }
 
-        if (!isSystem && !message.isStreaming && joinedMarkdown.isNotBlank()) {
+        if (!isSystem && joinedMarkdown.isNotBlank()) {
             val retryUserMessageId = (idx - 1 downTo 0)
                 .firstOrNull { messages[it].role == "user" }
                 ?.let { messages[it].id }
             out.add(dedupe(FlatChatItem.AssistantActions(
                 messageId = message.id,
-                messageMarkdown = joinedMarkdown,
+                // Pending controls cannot use partial text. Keep their row equal
+                // across token updates while reserving its final geometry.
+                messageMarkdown = if (message.isStreaming) "" else joinedMarkdown,
                 retryUserMessageId = retryUserMessageId,
+                isReady = !message.isStreaming,
             )))
         }
     }

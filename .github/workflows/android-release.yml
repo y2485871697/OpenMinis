@@ -68,7 +68,7 @@ jobs:
 
       - name: Test release unit logic
         working-directory: src/android
-        run: ./gradlew :app:testReleaseUnitTest --tests "com.openminis.app.provider.stream.SseEventReaderTest" --tests "com.openminis.app.ui.chat.StreamingSnapshotStoreTest" --tests "com.openminis.app.ui.chat.FinalChatRowEqualityTest" --tests "com.openminis.app.ui.chat.StreamingMarkdownProgressTest" --tests "com.openminis.app.ui.chat.StreamingPresentationTest" --tests "com.openminis.app.ui.chat.BottomFollowLayoutTest" --stacktrace
+        run: ./gradlew :app:testReleaseUnitTest --tests "com.openminis.app.provider.stream.SseEventReaderTest" --tests "com.openminis.app.ui.chat.StreamingSnapshotStoreTest" --tests "com.openminis.app.ui.chat.FinalChatRowEqualityTest" --tests "com.openminis.app.ui.chat.StreamingMarkdownProgressTest" --tests "com.openminis.app.ui.chat.StreamingPresentationTest" --tests "com.openminis.app.ui.chat.BottomFollowLayoutTest" --tests "com.openminis.app.ui.chat.AssistantActionsPresentationTest" --stacktrace
 
       - name: Assemble stable APK
         working-directory: src/android

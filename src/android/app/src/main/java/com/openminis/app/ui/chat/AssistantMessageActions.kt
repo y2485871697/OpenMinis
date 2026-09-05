@@ -2,6 +2,8 @@ package com.openminis.app.ui.chat
 
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -44,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -73,7 +76,9 @@ private val translationLanguageOptions = listOf(
 private fun translationLanguageLabel(tag: String): String =
     translationLanguageOptions.firstOrNull { it.tag == tag }?.displayName ?: tag
 
-/** RikkaHub-style actions shown once under every completed assistant reply. */
+private val MessageActionsRowHeight = 38.dp
+
+/** Reserve the footer while streaming; reveal only its pixels on completion. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun AssistantMessageActions(
@@ -88,7 +93,20 @@ internal fun AssistantMessageActions(
     onEdit: (String) -> Unit,
     onCreateBranch: () -> Unit,
     onDelete: () -> Unit,
+    isReady: Boolean = true,
 ) {
+    // Initial completed/history rows start at 1f, so recycling never replays
+    // the reveal. Only an already composed pending footer fades into view.
+    val actionsAlpha by animateFloatAsState(
+        targetValue = if (isReady) 1f else 0f,
+        animationSpec = tween(durationMillis = 160),
+        label = "assistantActionsReveal",
+    )
+    if (!isReady) {
+        // No hidden click targets, focus targets or accessibility actions.
+        Spacer(Modifier.fillMaxWidth().height(MessageActionsRowHeight))
+        return
+    }
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     var showMore by remember { mutableStateOf(false) }
@@ -96,7 +114,7 @@ internal fun AssistantMessageActions(
     var showEdit by remember { mutableStateOf(false) }
     var editText by remember(messageMarkdown) { mutableStateOf(messageMarkdown) }
 
-    Column(modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = Modifier.fillMaxWidth().graphicsLayer { alpha = actionsAlpha }) {
         if (!translation.isNullOrBlank()) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Row(
@@ -122,7 +140,7 @@ internal fun AssistantMessageActions(
         }
 
         Row(
-            modifier = Modifier.padding(top = 2.dp, bottom = 4.dp),
+            modifier = Modifier.height(MessageActionsRowHeight).padding(top = 2.dp, bottom = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {

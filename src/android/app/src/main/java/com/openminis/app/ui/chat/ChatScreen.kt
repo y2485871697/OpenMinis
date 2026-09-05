@@ -4466,6 +4466,7 @@ fun ChatScreen(
                             )
                             is FlatChatItem.AssistantActions -> AssistantMessageActions(
                                 messageMarkdown = item.messageMarkdown,
+                                isReady = item.isReady,
                                 translation = messageTranslations[item.messageId],
                                 translationLanguage = messageTranslationLanguages[item.messageId],
                                 isTranslating = item.messageId in translatingMessageIds,
