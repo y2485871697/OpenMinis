@@ -237,14 +237,19 @@ fun SpeechPlayerCapsule(
                 } else {
                     0f
                 }
+                // Exclude the rounded end caps from the playback range in both sizes.
+                val progressModifier = Modifier
+                    .padding(horizontal = 23.dp)
+                    .fillMaxWidth()
+                    .height(2.dp)
                 if (synthesizing && safeProgress == 0f) {
                     LinearProgressIndicator(
-                        modifier = Modifier.fillMaxWidth().height(2.dp),
+                        modifier = progressModifier,
                     )
                 } else {
                     LinearProgressIndicator(
                         progress = { safeProgress },
-                        modifier = Modifier.fillMaxWidth().height(2.dp),
+                        modifier = progressModifier,
                     )
                 }
             }
