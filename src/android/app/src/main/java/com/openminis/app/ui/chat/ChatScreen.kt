@@ -171,7 +171,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -2587,7 +2587,10 @@ fun ChatScreen(
         containerColor = ChatColors.background,
         contentWindowInsets = WindowInsets(0),
         topBar = {
-            TopAppBar(
+            val balanceActionWidth = 72.dp
+            // Match the action width on both sides so a full-width title stays pane-centered.
+            val sideActionWidth = 48.dp + if (activeBalanceValue != null) balanceActionWidth else 0.dp
+            CenterAlignedTopAppBar(
                 title = {
                     // iOS-style centered layout: "Minis" + group row + provider·model row
                     Box(
@@ -2612,15 +2615,7 @@ fun ChatScreen(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(10.dp))
                                 .background(Color.Red.copy(alpha = 0.35f * fallbackPulseAlpha.value))
-                                // [T-android-topbar-shrink] vertical 4dp→2dp.
-                                // Combined with the expandedHeight drop below,
-                                // closes the dead-space gap between the model
-                                // name row and the TopAppBar bottom edge that
-                                // T-topbar-model-row-clip's 76dp overshoot left
-                                // behind. Horizontal 32dp keeps the fallback
-                                // pulse highlight comfortably padded around
-                                // the longest title.
-                                .padding(horizontal = 32.dp, vertical = 2.dp),
+                                .padding(horizontal = 4.dp, vertical = 2.dp),
                         ) {
                             // Nav title: current session title when one
                             // exists and the toggle is on, else fall back to
@@ -2824,80 +2819,85 @@ fun ChatScreen(
                     }
                 },
                 navigationIcon = {
-                    // [T-android-tablet-split] See `isTwoPane`.
-                    if (!isTwoPane) {
-                        IconButton(onClick = onBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                        }
-                    } else if (onToggleSidebar != null) {
-                        // [T-android-tablet-sidebar-collapse] The slot the back
-                        // arrow vacates in two-pane becomes the sidebar toggle.
-                        //
-                        // ONE glyph for both states — the list icon, meaning
-                        // "the session list", with the action stated in the
-                        // content description instead.
-                        //
-                        // A directional chevron was tried for the expanded
-                        // state and is wrong here: this is the slot that used
-                        // to hold the back arrow, so a leading chevron reads as
-                        // "go back" — precisely the meaning two-pane removed.
-                        // Swapping the glyph on toggle also makes the control
-                        // look like two different buttons rather than one
-                        // switch. A stable icon whose accessible label changes
-                        // is both clearer and honest about what it targets.
-                        //
-                        // `Menu` rather than `List`, which this first used.
-                        // List draws a bulleted list — dots plus rules — whose
-                        // ink sat high and left in the 24dp box (measured 41x23
-                        // px with its mass above centre), so it read as a small
-                        // mark floating above the ⋮ at the other end of this
-                        // same bar. Menu's three full-width bars fill the box
-                        // symmetrically and optically centre against it; both
-                        // glyphs now share a baseline to the pixel. Menu is
-                        // also the conventional sidebar-toggle icon.
-                        //
-                        // [T-android-split-toggle-align] Two corrections, both
-                        // measured on a Mate Pad against the SESSION LIST's
-                        // toolbar rather than this bar's own ⋮ — the toggle sits
-                        // hard against the pane seam, so the icons it is read
-                        // beside are the list's Schedule/Terminal, not the
-                        // kebab at the far end of this bar. Aligned only to the
-                        // kebab, it measured 8px shorter and 3.5px lower than
-                        // its actual neighbours.
-                        //
-                        // 1. `offset(y = -2.dp)`: this bar is 68dp (see
-                        //    expandedHeight below — sized for the 3-row title
-                        //    and NOT reducible without re-triggering
-                        //    T-topbar-model-row-clip), while the list's bar is
-                        //    M3's default 64dp. A TopAppBar centres its
-                        //    navigation icon in its OWN height, so the 4dp
-                        //    difference put this glyph 2dp below the list's row.
-                        //    Offsetting by half the delta lands it on the list's
-                        //    baseline while leaving the taller bar intact.
-                        //
-                        // 2. `size(28.dp)`: Menu's three bars ink only ~12 of
-                        //    their 24dp viewport (bars at y=6/11/16), where the
-                        //    circular Schedule and boxy Terminal fill ~20 of
-                        //    theirs. At a matched box size Menu therefore reads
-                        //    markedly lighter and smaller. Scaling the box to
-                        //    28dp brings its ink to ~14dp, closing most of the
-                        //    optical gap. The IconButton's 48dp touch target is
-                        //    unchanged, so this is purely visual weight.
-                        IconButton(
-                            onClick = onToggleSidebar,
-                            modifier = Modifier.offset(y = (-2).dp),
-                        ) {
-                            Icon(
-                                Icons.Filled.Menu,
-                                contentDescription = stringResource(
-                                    if (sidebarCollapsed) {
-                                        R.string.chat_show_sidebar
-                                    } else {
-                                        R.string.chat_hide_sidebar
-                                    },
-                                ),
-                                modifier = Modifier.size(28.dp),
-                            )
+                    Row(
+                        modifier = Modifier.width(sideActionWidth),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        // [T-android-tablet-split] See `isTwoPane`.
+                        if (!isTwoPane) {
+                            IconButton(onClick = onBack) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                            }
+                        } else if (onToggleSidebar != null) {
+                            // [T-android-tablet-sidebar-collapse] The slot the back
+                            // arrow vacates in two-pane becomes the sidebar toggle.
+                            //
+                            // ONE glyph for both states — the list icon, meaning
+                            // "the session list", with the action stated in the
+                            // content description instead.
+                            //
+                            // A directional chevron was tried for the expanded
+                            // state and is wrong here: this is the slot that used
+                            // to hold the back arrow, so a leading chevron reads as
+                            // "go back" — precisely the meaning two-pane removed.
+                            // Swapping the glyph on toggle also makes the control
+                            // look like two different buttons rather than one
+                            // switch. A stable icon whose accessible label changes
+                            // is both clearer and honest about what it targets.
+                            //
+                            // `Menu` rather than `List`, which this first used.
+                            // List draws a bulleted list — dots plus rules — whose
+                            // ink sat high and left in the 24dp box (measured 41x23
+                            // px with its mass above centre), so it read as a small
+                            // mark floating above the ⋮ at the other end of this
+                            // same bar. Menu's three full-width bars fill the box
+                            // symmetrically and optically centre against it; both
+                            // glyphs now share a baseline to the pixel. Menu is
+                            // also the conventional sidebar-toggle icon.
+                            //
+                            // [T-android-split-toggle-align] Two corrections, both
+                            // measured on a Mate Pad against the SESSION LIST's
+                            // toolbar rather than this bar's own ⋮ — the toggle sits
+                            // hard against the pane seam, so the icons it is read
+                            // beside are the list's Schedule/Terminal, not the
+                            // kebab at the far end of this bar. Aligned only to the
+                            // kebab, it measured 8px shorter and 3.5px lower than
+                            // its actual neighbours.
+                            //
+                            // 1. `offset(y = -2.dp)`: this bar is 68dp (see
+                            //    expandedHeight below — sized for the 3-row title
+                            //    and NOT reducible without re-triggering
+                            //    T-topbar-model-row-clip), while the list's bar is
+                            //    M3's default 64dp. A TopAppBar centres its
+                            //    navigation icon in its OWN height, so the 4dp
+                            //    difference put this glyph 2dp below the list's row.
+                            //    Offsetting by half the delta lands it on the list's
+                            //    baseline while leaving the taller bar intact.
+                            //
+                            // 2. `size(28.dp)`: Menu's three bars ink only ~12 of
+                            //    their 24dp viewport (bars at y=6/11/16), where the
+                            //    circular Schedule and boxy Terminal fill ~20 of
+                            //    theirs. At a matched box size Menu therefore reads
+                            //    markedly lighter and smaller. Scaling the box to
+                            //    28dp brings its ink to ~14dp, closing most of the
+                            //    optical gap. The IconButton's 48dp touch target is
+                            //    unchanged, so this is purely visual weight.
+                            IconButton(
+                                onClick = onToggleSidebar,
+                                modifier = Modifier.offset(y = (-2).dp),
+                            ) {
+                                Icon(
+                                    Icons.Filled.Menu,
+                                    contentDescription = stringResource(
+                                        if (sidebarCollapsed) {
+                                            R.string.chat_show_sidebar
+                                        } else {
+                                            R.string.chat_hide_sidebar
+                                        },
+                                    ),
+                                    modifier = Modifier.size(28.dp),
+                                )
+                            }
                         }
                     }
                 },
@@ -2905,7 +2905,7 @@ fun ChatScreen(
                     // iOS: "..." circle button → dropdown menu
                     activeBalanceValue?.let { balance ->
                         Box(
-                            modifier = Modifier.width(72.dp).padding(end = 4.dp),
+                            modifier = Modifier.width(balanceActionWidth).padding(end = 4.dp),
                             contentAlignment = Alignment.CenterEnd,
                         ) {
                             ProviderBalanceBadge(value = balance)
