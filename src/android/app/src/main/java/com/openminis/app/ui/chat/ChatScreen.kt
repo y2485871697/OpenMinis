@@ -4039,7 +4039,7 @@ fun ChatScreen(
                     // hits ~1300 px while listState still reports
                     // firstVisible=0, firstOffset=0 (logged as the "tool on
                     // screen but not pushed into view" repro on Pixel 4a).
-                    verticalArrangement = Arrangement.spacedBy(2.dp, Alignment.Bottom),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
                     overscrollEffect = sharedEffect,
                 ) {
                     // T13 Resume banner — placed BEFORE items() so reverseLayout
