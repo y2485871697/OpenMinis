@@ -2016,6 +2016,13 @@ fun ChatScreen(
                     isUserDragging = true
                     followCompletedStream = false
                     userDragAwaitingSettle = true
+                    // Once the user starts reading during generation, keep the
+                    // live edge detached even when the drag begins inside the
+                    // growing assistant row. The settle pass must not infer a
+                    // resume merely because reverse-layout reports index 0.
+                    if (viewModel.isStreaming.value) {
+                        manualDragLeftBottom = true
+                    }
                     AppLogger.debug("ScrollReadingAnchor", "drag-start index=${listState.firstVisibleItemIndex} offset=${listState.firstVisibleItemScrollOffset}")
                     dragStartedNearBottom = isNearBottom.value
                     dragStartIndex = listState.firstVisibleItemIndex
@@ -2045,7 +2052,7 @@ fun ChatScreen(
                         manualDragLeftBottom = true
                         lastInterruptMs = System.currentTimeMillis()
                         userScrolledAway = true
-                    } else if (nowAtBottom) {
+                    } else if (nowAtBottom && !viewModel.isStreaming.value) {
                         manualDragLeftBottom = false
                         lastInterruptMs = 0L
                         userScrolledAway = false
@@ -2174,7 +2181,8 @@ fun ChatScreen(
                 val settled = currentGestureLayout()
                 if (settled.shouldSettle) {
                     userDragAwaitingSettle = false
-                    val resumedAtBottom = settled.atBottom && !manualDragLeftBottom
+                    val resumedAtBottom = settled.atBottom &&
+                        !manualDragLeftBottom && !viewModel.isStreaming.value
                     userScrolledAway = !resumedAtBottom
                     followCompletedStream = resumedAtBottom
                     lastInterruptMs = if (resumedAtBottom) 0L else System.currentTimeMillis()
@@ -3702,8 +3710,11 @@ fun ChatScreen(
                         previous = current
                         if (growth > 0) {
                             // This is geometry compensation, not a new scroll intent.
-                            // Raw delta keeps the ongoing drag/fling alive and avoids
-                            // cancelling it with scrollToItem/requestScrollToItem.
+                            // Coalesce geometry changes until the next frame. Streaming
+                            // markdown commonly publishes several layout changes in one
+                            // frame; dispatching each raw delta immediately causes a
+                            // visible oscillation while Compose is still remeasuring.
+                            withFrameNanos { }
                             val consumed = listState.dispatchRawDelta(growth.toFloat())
                             if (now - lastLogMs >= 500L) {
                                 lastLogMs = now
