@@ -1550,7 +1550,7 @@ private fun markdownBlocksForPresentation(
                 return result
             }
             if (table) {
-                val (headers, rows) = parseTable(tail)
+                val (headers, rows) = parseTable(listOf(tail))
                 result.add(MdBlock.Table(tail, headers, rows))
                 return result
             }
