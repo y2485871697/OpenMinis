@@ -3100,23 +3100,23 @@ class ChatViewModel(
     private fun buildConversationTextForSummary(history: List<LLMMessage>): String = buildString {
         for (msg in history) {
             val role = msg.role.name.lowercase()
-            val text = msg.content.take(500)
+            val text = msg.content.take(4000)
             if (text.isNotEmpty()) {
                 append(role).append(": ").append(text).append('\n')
             }
             for (part in msg.contentParts) {
                 when (part) {
                     is AgentContentPart.Text -> {
-                        append(role).append(": ").append(part.text.take(500)).append('\n')
+                        append(role).append(": ").append(part.text.take(4000)).append('\n')
                     }
                     is AgentContentPart.ToolUse -> {
-                        val preview = part.input.toString().take(200)
+                        val preview = part.input.toString().take(4000)
                         append(role).append(" [tool:").append(part.name).append("]: ")
                             .append(preview).append('\n')
                     }
                     is AgentContentPart.ToolResult -> {
                         append(role).append(" [result:").append(part.name).append("]: ")
-                            .append(part.content.take(500)).append('\n')
+                            .append(part.content.take(8000)).append('\n')
                     }
                     is AgentContentPart.ImageData -> {
                         append(role).append(" [image: ").append(part.mimeType).append("]\n")
@@ -3238,7 +3238,7 @@ class ChatViewModel(
             append("\n\n---\n待压缩对话到此结束。\n\n")
             append(
                 "请严格按照系统提示生成结构化上下文摘要。不要继续回答上面的对话，只做摘要。" +
-                    "所有事件使用过去时，描述已经讨论和已经完成的内容，不要写成仍在进行的目标或待办事项。"
+                    "所有事件使用过去时，描述已经讨论和已经完成的内容，不要写成仍在进行的目标或待办事项。请额外保留用户目标和硬性约束、已完成操作、文件路径与关键结果、工具调用结论、未完成事项和不可重复执行的步骤；不确定信息必须标注，不得臆造。"
             )
         }
         val providers = buildList<Pair<LLMProvider, String>> {
