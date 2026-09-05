@@ -2064,45 +2064,7 @@ fun ChatScreen(
         }
     }
     // Keyboard/layout changes must not clear an explicit history-reading pause.
-    val imeBottomPx = WindowInsets.ime.getBottom(LocalDensity.current)
-    // Re-engage follow whenever the user (manually or via FAB) returns
-    // the viewport to the bottom.
-    //
-    // [T-android-stream-end-anchor-jump] Gate the clear on RECENT USER
-    // INTERACTION. Without this, the final markdown re-render at the
-    // streaming→idle edge briefly collapses the last assistant row's height
-    // (large code blocks / tables / images finalizing their layout), which
-    // clamps firstVisibleItemScrollOffset within the nearBottomThreshold for
-    // one frame. isNearBottom flips true, this LE clears userScrolledAway,
-    // and the stream-end settle LE — whose live-anchor check sees the same
-    // bogus near-bottom offset — then scrollToItem()s the user back to
-    // wherever the layout collapse parked them (often the start of the
-    // current user message, because that's the "first content row" the
-    // settle LE pins on). Only accept the clear when the user actually
-    // dragged into this position recently — a real return-to-bottom gesture
-    // always trails a DragInteraction.Stop, which lastInterruptMs records.
-    // FAB taps also work because the FAB onClick path resets userScrolledAway
-    // directly (line 1124) and never relies on this LE.
-    LaunchedEffect(isNearBottom.value) {
-        if (isNearBottom.value && userScrolledAway) {
-            if (manualDragLeftBottom) return@LaunchedEffect
-            val sinceDragMs = System.currentTimeMillis() - lastInterruptMs
-            // KEEP userScrolledAway when no recent drag — the at-bottom
-            // reading came from a stream-end layout reflow, not a real
-            // return-to-bottom gesture.
-            if (sinceDragMs > 1500L) return@LaunchedEffect
-            userScrolledAway = false
-        }
-    }
-    // T169 / T170: an IME show/hide animates the LazyColumn's content area,
-    // which can briefly register as a synthetic drag-stop and flip
-    // userScrolledAway=true even though the user never actually scrolled.
-    //
-    // T170: only force-reset when we're actually back at the bottom. Earlier
-    // behaviour of unconditionally clearing userScrolledAway hid the FAB on
-    // users who had scrolled up to read history and then opened the keyboard
-    // to send a follow-up — auto-follow then yanked them away from where
-    // they were reading.
+    // Keyboard/layout changes must not clear an explicit history-reading pause.
     // [T-android-tool-autoscroll] Start-of-turn edge from ViewModel: resume() /
     // retryLast() / retryFromMessage() / rerunFromToolBlock() emit Unit on
     // forceScrollToBottom because they don't append a new user-message row, so
@@ -2211,9 +2173,10 @@ fun ChatScreen(
                 val settled = currentGestureLayout()
                 if (settled.shouldSettle) {
                     userDragAwaitingSettle = false
-                    userScrolledAway = !settled.atBottom
-                    followCompletedStream = settled.atBottom
-                    lastInterruptMs = if (settled.atBottom) 0L else System.currentTimeMillis()
+                    val resumedAtBottom = settled.atBottom && !manualDragLeftBottom
+                    userScrolledAway = !resumedAtBottom
+                    followCompletedStream = resumedAtBottom
+                    lastInterruptMs = if (resumedAtBottom) 0L else System.currentTimeMillis()
                 }
             }
         }

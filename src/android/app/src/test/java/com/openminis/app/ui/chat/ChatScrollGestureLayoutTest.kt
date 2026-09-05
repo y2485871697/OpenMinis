@@ -62,7 +62,8 @@ class ChatScrollGestureLayoutTest {
         assertFalse(screen.contains("LaunchedEffect(imeBottomPx)"))
         assertFalse(screen.contains("tracedScrollToItem(\"settle-after-interaction\""))
         assertTrue(screen.contains("fun currentGestureLayout() = ChatScrollGestureLayout("))
-        assertTrue(screen.contains("userScrolledAway = !settled.atBottom"))
+        assertTrue(screen.contains("val resumedAtBottom = settled.atBottom && !manualDragLeftBottom"))
+        assertTrue(screen.contains("userScrolledAway = !resumedAtBottom"))
     }
     @Test fun delayedCorrectionsRespectTheNewPause() {
         val screen = source("ChatScreen")
