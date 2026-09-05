@@ -546,6 +546,8 @@ internal fun FallbackInfoBlock(block: AssistantBlock, onRevert: (() -> Unit)? = 
     // compact summary). Tapping opens a bottom sheet showing the full text.
     // Mirrors iOS compactDividerRow's info.circle button.
     val hasDetail = block.toolArgs.isNotEmpty()
+    val dividerText = if (block.toolName == "compact" && hasDetail)
+        block.content.substringBefore(" · ") else block.content
     var showDetail by remember(block.id) { mutableStateOf(false) }
 
     androidx.compose.ui.layout.SubcomposeLayout(
@@ -577,12 +579,12 @@ internal fun FallbackInfoBlock(block: AssistantBlock, onRevert: (() -> Unit)? = 
                     modifier = Modifier.size(10.dp),
                 )
                 Text(
-                    text = block.content,
+                    text = dividerText,
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Medium,
                     color = fg,
                     textAlign = TextAlign.Center,
-                    maxLines = if (block.toolName == "compact" && hasDetail) Int.MAX_VALUE else 1,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     // weight(1f, fill=false) lets the text take just what it
                     // needs but lose space first when the row gets tight,
@@ -635,6 +637,9 @@ internal fun FallbackInfoBlock(block: AssistantBlock, onRevert: (() -> Unit)? = 
     if (showDetail && hasDetail) {
         CompactSummarySheet(
             summary = block.toolArgs,
+            modelAttribution = compactAttributionSubtitle(block.toolTitle.ifBlank {
+                block.content.substringAfter(" · ", "")
+            }).takeIf { it.isNotBlank() },
             onDismiss = { showDetail = false },
             onRevert = onRevert,
         )
@@ -649,6 +654,7 @@ internal fun FallbackInfoBlock(block: AssistantBlock, onRevert: (() -> Unit)? = 
 @Composable
 private fun CompactSummarySheet(
     summary: String,
+    modelAttribution: String? = null,
     onDismiss: () -> Unit,
     onRevert: (() -> Unit)? = null,
 ) {
@@ -659,6 +665,7 @@ private fun CompactSummarySheet(
 
     StandardChatSheet(
         title = stringResource(R.string.minis_compact_summary_title),
+        subtitle = modelAttribution,
         onDismiss = onDismiss,
         leadingAction = {
             IconButton(onClick = {

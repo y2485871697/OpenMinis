@@ -1966,7 +1966,7 @@ class ChatViewModel(
      * iOS `appendSystemInfo` behavior which surfaces a local notice in the chat
      * stream. Future work: wire real conversation compaction through the LLM.
      */
-    private fun appendSystemInfo(text: String, iconKind: String, payload: String? = null) {
+    private fun appendSystemInfo(text: String, iconKind: String, payload: String? = null, detailLabel: String? = null) {
         val block = AssistantBlock(
             id = "sysinfo_${System.currentTimeMillis()}",
             kind = "info",
@@ -1976,6 +1976,7 @@ class ChatViewModel(
             // this carries the full summary text so the UI can show an info-icon
             // affordance opening a detail sheet (mirrors iOS CompactSummarySheet).
             toolArgs = payload.orEmpty(),
+            toolTitle = detailLabel.orEmpty(),
         )
         _messages.value = _messages.value + ChatMessage(
             id = "sysinfo_${System.currentTimeMillis()}",
@@ -2374,9 +2375,10 @@ class ChatViewModel(
                     _messages.value = cleaned
                     AppLogger.info(TAG, "[Compact] divider: $compactedUICount UI bubbles compacted (history entries: ${toCompact.size})")
                     appendSystemInfo(
-                        text = "已压缩 $compactedUICount 条消息 · $compactModelLabel",
+                        text = "已压缩 $compactedUICount 条消息",
                         iconKind = "compact",
                         payload = summary,
+                        detailLabel = compactModelLabel,
                     )
                 }
                 compactSucceeded = true
@@ -4631,16 +4633,14 @@ class ChatViewModel(
         val compactedUICount = (0 until insertIdx.coerceIn(0, grayed.size))
             .count { grayed[it].role != "system" }
         val markerForDivider = healedMarker ?: marker
-        val dividerLabel = buildString {
-            append("已压缩 $compactedUICount 条消息")
-            compactSummaryModel(markerForDivider.summary)?.let { append(" · $it") }
-        }
+        val dividerLabel = "已压缩 $compactedUICount 条消息"
         val dividerBlock = AssistantBlock(
             id = "compact-divider-${markerForDivider.id}",
             kind = "info",
             content = dividerLabel,
             toolName = "compact",
             toolArgs = compactSummaryText(markerForDivider.summary),
+            toolTitle = compactSummaryModel(markerForDivider.summary).orEmpty(),
         )
         val dividerMsg = ChatMessage(
             id = "compact-divider-msg-${markerForDivider.id}",

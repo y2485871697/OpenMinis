@@ -121,29 +121,24 @@ internal fun CompactProgressIndicator(
         modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        androidx.compose.foundation.layout.Column(Modifier.weight(1f)) {
-            Text(
-                text = if (progress.depth > 0) {
-                    // Only surfaced once a split actually happened — saying
-                    // "segment 1" on the common single-call path would imply a
-                    // complexity that isn't there.
-                    stringResource(
-                        R.string.compact_progress_split,
-                        elapsedSec,
-                        progress.callsIssued,
-                        progress.callBudget,
-                    )
-                } else {
-                    stringResource(R.string.compact_progress, elapsedSec)
-                },
-                fontSize = 14.sp,
-                color = ChatColors.tertiaryText,
-                modifier = Modifier,
-            )
-            progress.modelLabel?.let { label ->
-                Text(text = label, fontSize = 12.sp, color = ChatColors.tertiaryText)
-            }
-        }
+        Text(
+            text = if (progress.depth > 0) {
+                // Only surfaced once a split actually happened — saying
+                // "segment 1" on the common single-call path would imply a
+                // complexity that isn't there.
+                stringResource(
+                    R.string.compact_progress_split,
+                    elapsedSec,
+                    progress.callsIssued,
+                    progress.callBudget,
+                )
+            } else {
+                stringResource(R.string.compact_progress, elapsedSec)
+            },
+            fontSize = 14.sp,
+            color = ChatColors.tertiaryText,
+            modifier = Modifier.weight(1f),
+        )
         Text(
             text = stringResource(R.string.cancel),
             fontSize = 14.sp,

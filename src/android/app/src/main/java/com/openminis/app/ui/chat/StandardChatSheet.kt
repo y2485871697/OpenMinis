@@ -55,6 +55,7 @@ fun StandardChatSheet(
     onDismiss: () -> Unit,
     leadingAction: (@Composable () -> Unit)? = null,
     heightFraction: Float = 0.9f,
+    subtitle: String? = null,
     content: @Composable () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -76,6 +77,7 @@ fun StandardChatSheet(
                 title = title,
                 onDismiss = onDismiss,
                 leadingAction = leadingAction,
+                subtitle = subtitle,
             )
             HorizontalDivider(thickness = 0.5.dp, color = ChatColors.separator)
             Box(modifier = Modifier.fillMaxSize()) {
@@ -120,6 +122,7 @@ fun StandardChatSheetHeader(
     title: String,
     onDismiss: () -> Unit,
     leadingAction: (@Composable () -> Unit)? = null,
+    subtitle: String? = null,
 ) {
     Row(
         modifier = Modifier
@@ -147,5 +150,15 @@ fun StandardChatSheetHeader(
                 tint = ChatColors.secondaryText,
             )
         }
+    }
+    if (!subtitle.isNullOrBlank()) {
+        Text(
+            text = subtitle,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Medium,
+            color = ChatColors.secondaryText,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
+        )
     }
 }
