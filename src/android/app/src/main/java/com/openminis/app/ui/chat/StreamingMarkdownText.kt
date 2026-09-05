@@ -1235,6 +1235,18 @@ private fun findDisplayMathClose(lines: List<String>, from: Int): Int? {
     return null
 }
 
+@androidx.annotation.VisibleForTesting
+internal fun markdownHeadingLevel(trimmed: String): Int? {
+    var end = 0
+    while (end < trimmed.length && trimmed[end] == '#') end++
+    if (end !in 1..6) return null
+    return if (end == trimmed.length || trimmed[end] == ' ' || trimmed[end] == '\t') end else null
+}
+
+@androidx.annotation.VisibleForTesting
+internal suspend fun parseMarkdownBlockRawsForTest(content: String): List<String> =
+    parseMarkdownBlocks(content).map { it.raw }
+
 private suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
     val blocks = mutableListOf<MdBlock>()
     val lines = content.lines()
@@ -1249,8 +1261,10 @@ private suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
             sinceLastCheck = 0
         }
         sinceLastCheck++
+        val startLine = i
         val line = lines[i]
         val trimmed = line.trimStart()
+        val headingLevel = markdownHeadingLevel(trimmed)
 
         when {
             // T155: display math `$$...$$` (single-line or multi-line) and `\[...\]`
@@ -1348,10 +1362,9 @@ private suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
             }
 
             // Heading
-            trimmed.startsWith("#") && (trimmed.length == 1 || trimmed[trimmed.indexOfFirst { it != '#' }.coerceAtLeast(0)] == ' ') -> {
-                val level = trimmed.takeWhile { it == '#' }.length.coerceAtMost(6)
-                val text = trimmed.drop(level).trimStart()
-                blocks.add(MdBlock.Heading(line, level, text))
+            headingLevel != null -> {
+                val text = trimmed.drop(headingLevel).trimStart()
+                blocks.add(MdBlock.Heading(line, headingLevel, text))
                 i++
             }
 
@@ -1481,7 +1494,7 @@ private suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
                 while (i < lines.size) {
                     val l = lines[i]
                     val t = l.trimStart()
-                    if (t.isEmpty() || t.startsWith("#") || t.startsWith("```") ||
+                    if (t.isEmpty() || markdownHeadingLevel(t) != null || t.startsWith("```") ||
                         isBlockquoteLine(t) || t.matches(thematicBreakRegex) ||
                         t.matches(bulletListItemRegex) || t.matches(numberedListItemRegex) ||
                         t.matches(standaloneImageLineRegex) ||
@@ -1517,6 +1530,12 @@ private suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
                     }
                 }
             }
+        }
+        // A partial block must never retry the same line indefinitely. Preserve
+        // the raw text if a future block predicate disagrees with its consumer.
+        if (i == startLine) {
+            blocks.add(MdBlock.Paragraph(line))
+            i++
         }
     }
     return blocks
