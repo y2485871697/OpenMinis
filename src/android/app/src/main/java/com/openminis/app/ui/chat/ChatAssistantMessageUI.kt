@@ -623,9 +623,11 @@ internal fun formatToolDetailsForClipboard(block: AssistantBlock): String {
     }
 }
 
+private const val TOOL_RESULT_PREVIEW_CHARS = 4_000
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private const val TOOL_RESULT_PREVIEW_CHARS = 4_000`n`ninternal fun ToolCallPill(
+internal fun ToolCallPill(
     block: AssistantBlock,
     allToolBlocks: List<AssistantBlock> = listOf(block),
     onRetry: (() -> Unit)? = null,
