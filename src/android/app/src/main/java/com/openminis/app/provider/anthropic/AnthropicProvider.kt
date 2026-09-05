@@ -190,7 +190,7 @@ class AnthropicProvider(
         val toolInputBuffer = StringBuilder()
 
         try {
-                for (sseEvent in SseEventReader(reader)) {
+            for (sseEvent in SseEventReader(reader)) {
                 val payload = sseEvent.data
                 if (payload == "[DONE]") break
 
