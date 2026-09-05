@@ -1998,6 +1998,10 @@ fun ChatScreen(
     // streaming" bug).
     var isUserDragging by remember { mutableStateOf(false) }
     var userDragAwaitingSettle by remember { mutableStateOf(false) }
+    var dragStartedNearBottom by remember { mutableStateOf(false) }
+    var manualDragLeftBottom by remember { mutableStateOf(false) }
+    var dragStartIndex by remember { mutableStateOf(0) }
+    var dragStartOffset by remember { mutableStateOf(0) }
     LaunchedEffect(listState) {
         listState.interactionSource.interactions.collect { interaction ->
             // T-android-jank-profile: drag interactions fire on every drag
@@ -2012,6 +2016,14 @@ fun ChatScreen(
                     followCompletedStream = false
                     userDragAwaitingSettle = true
                     AppLogger.debug("ScrollReadingAnchor", "drag-start index=${listState.firstVisibleItemIndex} offset=${listState.firstVisibleItemScrollOffset}")
+                    dragStartedNearBottom = isNearBottom.value
+                    dragStartIndex = listState.firstVisibleItemIndex
+                    dragStartOffset = listState.firstVisibleItemScrollOffset
+                    // A new gesture from an already detached history position
+                    // may explicitly return to the live edge. A gesture that
+                    // starts at the live edge must be allowed to detach even
+                    // when it ends within the near-bottom threshold.
+                    if (!dragStartedNearBottom) manualDragLeftBottom = false
                     // [T-android-scrollbtn-turn-walk] A manual drag breaks the
                     // up-button's turn-walk chain: the next tap should re-anchor
                     // to wherever the user landed, not continue the old sequence.
@@ -2019,12 +2031,33 @@ fun ChatScreen(
                 }
                 is androidx.compose.foundation.interaction.DragInteraction.Stop -> {
                     isUserDragging = false
-                    lastInterruptMs = System.currentTimeMillis()
+                    val nowAtBottom = isNearBottom.value
+                    val movedDuringDrag =
+                        dragStartIndex != listState.firstVisibleItemIndex ||
+                            dragStartOffset != listState.firstVisibleItemScrollOffset
+                    val leftBottomDuringDrag = dragStartedNearBottom && movedDuringDrag
+                    // Returning all the way to the bottom is an explicit
+                    // request to resume live follow. Keeping the generic 1 s
+                    // post-drag grace here left new text growing behind the
+                    // composer, then made it appear in one delayed burst.
+                    if (leftBottomDuringDrag) {
+                        manualDragLeftBottom = true
+                        lastInterruptMs = System.currentTimeMillis()
+                        userScrolledAway = true
+                    } else if (nowAtBottom) {
+                        manualDragLeftBottom = false
+                        lastInterruptMs = 0L
+                        userScrolledAway = false
+                    } else {
+                        lastInterruptMs = System.currentTimeMillis()
+                        userScrolledAway = true
+                    }
                     // Stay paused until both the drag and any fling have settled.
                 }
                 is androidx.compose.foundation.interaction.DragInteraction.Cancel -> {
                     isUserDragging = false
                     userDragAwaitingSettle = false
+                    dragStartedNearBottom = false
                 }
                 else -> Unit
             }
@@ -2032,6 +2065,44 @@ fun ChatScreen(
     }
     // Keyboard/layout changes must not clear an explicit history-reading pause.
     val imeBottomPx = WindowInsets.ime.getBottom(LocalDensity.current)
+    // Re-engage follow whenever the user (manually or via FAB) returns
+    // the viewport to the bottom.
+    //
+    // [T-android-stream-end-anchor-jump] Gate the clear on RECENT USER
+    // INTERACTION. Without this, the final markdown re-render at the
+    // streaming→idle edge briefly collapses the last assistant row's height
+    // (large code blocks / tables / images finalizing their layout), which
+    // clamps firstVisibleItemScrollOffset within the nearBottomThreshold for
+    // one frame. isNearBottom flips true, this LE clears userScrolledAway,
+    // and the stream-end settle LE — whose live-anchor check sees the same
+    // bogus near-bottom offset — then scrollToItem()s the user back to
+    // wherever the layout collapse parked them (often the start of the
+    // current user message, because that's the "first content row" the
+    // settle LE pins on). Only accept the clear when the user actually
+    // dragged into this position recently — a real return-to-bottom gesture
+    // always trails a DragInteraction.Stop, which lastInterruptMs records.
+    // FAB taps also work because the FAB onClick path resets userScrolledAway
+    // directly (line 1124) and never relies on this LE.
+    LaunchedEffect(isNearBottom.value) {
+        if (isNearBottom.value && userScrolledAway) {
+            if (manualDragLeftBottom) return@LaunchedEffect
+            val sinceDragMs = System.currentTimeMillis() - lastInterruptMs
+            // KEEP userScrolledAway when no recent drag — the at-bottom
+            // reading came from a stream-end layout reflow, not a real
+            // return-to-bottom gesture.
+            if (sinceDragMs > 1500L) return@LaunchedEffect
+            userScrolledAway = false
+        }
+    }
+    // T169 / T170: an IME show/hide animates the LazyColumn's content area,
+    // which can briefly register as a synthetic drag-stop and flip
+    // userScrolledAway=true even though the user never actually scrolled.
+    //
+    // T170: only force-reset when we're actually back at the bottom. Earlier
+    // behaviour of unconditionally clearing userScrolledAway hid the FAB on
+    // users who had scrolled up to read history and then opened the keyboard
+    // to send a follow-up — auto-follow then yanked them away from where
+    // they were reading.
     // [T-android-tool-autoscroll] Start-of-turn edge from ViewModel: resume() /
     // retryLast() / retryFromMessage() / rerunFromToolBlock() emit Unit on
     // forceScrollToBottom because they don't append a new user-message row, so
@@ -2043,6 +2114,7 @@ fun ChatScreen(
             // Match the user-send path: clear any prior "scrolled away" flag
             // so the streaming auto-follow stays active for the new turn.
             pendingSearchMessageId = null
+            manualDragLeftBottom = false
             userScrolledAway = false
             tracedScrollToItem("FORCE-SCROLL-TO-BOTTOM(resume/retry/rerun)", 0, 0)
         }
@@ -2058,6 +2130,7 @@ fun ChatScreen(
         // was missed.
         lastUserAppendMs = System.currentTimeMillis()
         pendingSearchMessageId = null
+        manualDragLeftBottom = false
         userScrolledAway = false
         tracedScrollToItem("USER-APPEND-SNAP", 0, 0)
     }
