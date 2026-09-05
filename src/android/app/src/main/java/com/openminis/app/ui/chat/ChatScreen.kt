@@ -3980,6 +3980,30 @@ fun ChatScreen(
                 val perfFirstLayoutFired = remember(sessionId) { java.util.concurrent.atomic.AtomicBoolean(false) }
                 Box {
                 AlwaysStretchOverscrollBox { sharedEffect ->
+                // DragInteraction is not emitted reliably for every nested
+                // scroll path (notably while the finger remains inside a
+                // growing assistant row). Nested scroll is the lower-level
+                // user-input signal: pause live follow on real vertical
+                // deltas only. Layout growth and programmatic pins use a
+                // different source and therefore cannot pause or resume it.
+                val userScrollPauseConnection = remember(listState) {
+                    object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
+                        override fun onPreScroll(
+                            available: androidx.compose.ui.geometry.Offset,
+                            source: androidx.compose.ui.input.nestedscroll.NestedScrollSource,
+                        ): androidx.compose.ui.geometry.Offset {
+                            if (source == androidx.compose.ui.input.nestedscroll.NestedScrollSource.UserInput &&
+                                kotlin.math.abs(available.y) > 0.5f &&
+                                viewModel.isStreaming.value
+                            ) {
+                                userScrolledAway = true
+                                followCompletedStream = false
+                                lastInterruptMs = System.currentTimeMillis()
+                            }
+                            return androidx.compose.ui.geometry.Offset.Zero
+                        }
+                    }
+                }
                 LazyColumn(
                     state = listState,
                     reverseLayout = true,
@@ -4004,6 +4028,7 @@ fun ChatScreen(
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
+                        .nestedScroll(userScrollPauseConnection)
                         // [T-android-chat-max-content-width] Cap the reading
                         // measure on a wide window, mirroring iOS
                         // AIChatView.maxContentWidth (900pt when the horizontal
