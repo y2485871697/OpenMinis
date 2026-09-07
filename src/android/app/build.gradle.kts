@@ -2,7 +2,10 @@ import java.util.Properties
 
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
+    // [toolchain-2026] AGP 9.0+ has Kotlin support BUILT IN — applying
+    // org.jetbrains.kotlin.android on top is now a hard error. The compose
+    // compiler and serialization KGP plugins still apply normally on top of
+    // AGP's built-in Kotlin.
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
     id("com.google.devtools.ksp")
@@ -113,12 +116,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    // [toolchain-2026] AGP 9 removed the kotlinOptions{} DSL; the Kotlin
-    // Android plugin's compilerOptions (Kotlin 2.3) is the replacement.
-    // JVM target stays 17 so the on-device art profile is unchanged.
-    compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-    }
+    // [toolchain-2026] AGP 9 removed the kotlinOptions{} DSL and its Kotlin
+    // is built-in: the built-in compiler follows compileOptions above (Java
+    // 17), so no explicit jvmTarget block is needed. Keeping one in the old
+    // DSL shape would fail configuration.
 
     buildFeatures {
         compose = true
