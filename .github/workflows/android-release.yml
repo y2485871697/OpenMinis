@@ -97,23 +97,21 @@ jobs:
           # script — keeps it byte-identical to upstream.
           sudo tee /usr/local/bin/shasum > /dev/null <<'SHIM'
           #!/bin/sh
-          exec sha256sum "$@"
+          # macOS shasum accepts `-a 256`; GNU sha256sum does not. Strip the
+          # -a <algo> pair before delegating — build_proot.sh always calls
+          # `shasum -a 256 <file>`.
+          for a in "$@"; do :; done
+          args=""
+          skip=0
+          for a in "$@"; do
+            if [ "$skip" = "1" ]; then skip=0; continue; fi
+            if [ "$a" = "-a" ]; then skip=1; continue; fi
+            args="$args \"$a\""
+          done
+          eval exec sha256sum $args
           SHIM
           sudo chmod +x /usr/local/bin/shasum
-          # Debug the shim itself
-          cat /usr/local/bin/shasum || true
-          shasum -a 256 src/android/app/src/main/jniLibs/arm64-v8a/libproot-loader.so || echo "SHASUM-FAILED rc=$?"
-          which shasum sha256sum || true
-          # Debug: confirm the vendored loaders actually landed on disk after
-          # checkout (the sha256 pin check below reads them straight from the
-          # working tree).
-          ls -la src/android/app/src/main/jniLibs/arm64-v8a/ || true
-          # [fork-ci-fix] The vendored loaders are in the git INDEX (ls-files
-          # sees them) but absent from the working tree after actions/checkout
-          # on this fork — force-restore them straight from HEAD. This is a
-          # belt-and-braces no-op on a healthy checkout.
-          git checkout HEAD -- src/android/app/src/main/jniLibs/arm64-v8a/ || true
-          ls -la src/android/app/src/main/jniLibs/arm64-v8a/ || true
+          shasum -a 256 src/android/app/src/main/jniLibs/arm64-v8a/libproot-loader.so
           ./deps/build_proot.sh
 
       # ── Stage 2: Alpine rootfs asset ──────────────────────────────────
