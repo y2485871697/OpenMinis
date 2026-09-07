@@ -104,8 +104,12 @@ jobs:
           # checkout (the sha256 pin check below reads them straight from the
           # working tree).
           ls -la src/android/app/src/main/jniLibs/arm64-v8a/ || true
-          git ls-files src/android/app/src/main/jniLibs/ || true
-          git check-ignore -v src/android/app/src/main/jniLibs/arm64-v8a/libproot-loader.so || echo "not ignored"
+          # [fork-ci-fix] The vendored loaders are in the git INDEX (ls-files
+          # sees them) but absent from the working tree after actions/checkout
+          # on this fork — force-restore them straight from HEAD. This is a
+          # belt-and-braces no-op on a healthy checkout.
+          git checkout HEAD -- src/android/app/src/main/jniLibs/arm64-v8a/ || true
+          ls -la src/android/app/src/main/jniLibs/arm64-v8a/ || true
           ./deps/build_proot.sh
 
       # ── Stage 2: Alpine rootfs asset ──────────────────────────────────
