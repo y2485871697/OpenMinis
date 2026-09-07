@@ -89,13 +89,13 @@ android {
         // broken upgrade path, not key theft).
         create("release") {
             val ksProps = Properties()
-            val ksFile = rootProject.file("../keystore/keystore.properties")
+            val ksFile = rootProject.file("../../keystore/keystore.properties")
             if (ksFile.exists()) {
                 ksFile.inputStream().use { ksProps.load(it) }
             }
             // Keystore lives at repo root /keystore/ — rootProject here is
             // src/android/, so walk up one level.
-            storeFile = rootProject.file("../keystore/minis-fork-release.keystore")
+            storeFile = rootProject.file("../../keystore/minis-fork-release.keystore")
             storePassword = ksProps.getProperty("storePassword", "minisfork")
             keyAlias = ksProps.getProperty("keyAlias", "minisfork")
             keyPassword = ksProps.getProperty("keyPassword", "minisfork")
