@@ -558,6 +558,11 @@ fun ProviderDetailScreen(
                                     balanceResultPath = balanceResultPath.ifBlank { "data.total_usage" },
                                 ),
                             )
+                            // [T-android-provider-balance] Config changed — the
+                            // preview must re-fetch against the new paths, and
+                            // readouts elsewhere (top bar / picker) follow via
+                            // the same trigger.
+                            com.openminis.app.provider.balance.ProviderBalance.invalidate()
                             AppLogger.info(
                                 TAG,
                                 "Saved balance settings for ${instance.id}: " +

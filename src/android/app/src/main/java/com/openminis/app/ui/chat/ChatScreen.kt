@@ -562,6 +562,19 @@ fun ChatScreen(
     val messages by viewModel.uiMessages.collectAsState()
     val hasOlderMessages by viewModel.hasOlderMessages.collectAsState()
     val isStreaming by viewModel.isStreaming.collectAsState()
+    // [T-android-provider-balance] Real-time balance: each streaming turn
+    // that just ended consumed provider credit — nudge every visible
+    // balance readout to re-fetch. Watching the UI-level flow keeps the
+    // trigger in one place instead of threading invalidate() through all
+    // ten _isStreaming clear sites in the ViewModel. previous=false guards
+    // the initial composition (false → false must not fire).
+    var wasStreaming by remember { mutableStateOf(false) }
+    LaunchedEffect(isStreaming) {
+        if (wasStreaming && !isStreaming) {
+            com.openminis.app.provider.balance.ProviderBalance.invalidate()
+        }
+        wasStreaming = isStreaming
+    }
     val canResume by viewModel.canResume.collectAsState()
     // [T-android-compact-progress] null when no compaction is running.
     val compactProgress by viewModel.compactProgress.collectAsState()

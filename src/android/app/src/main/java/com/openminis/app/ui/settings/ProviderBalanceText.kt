@@ -2,14 +2,18 @@ package com.openminis.app.ui.settings
 
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.produceState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -21,9 +25,15 @@ import com.openminis.app.provider.balance.ProviderBalance
 
 /**
  * Wallet icon + balance text, mirroring RikkaHub's ProviderBalanceText.
- * Renders nothing when balance is disabled for the instance or the value
- * can't be fetched. The 2-minute cache lives in ProviderBalance, and the
- * produceState key covers enabled/apiPath/resultPath so edits re-fetch.
+ * Renders nothing when balance is disabled for the instance or no value
+ * has ever been fetched.
+ *
+ * Real-time behavior: the first composition paints the last-known value
+ * instantly (no flash of nothing), then a produceState keyed on the config
+ * fields AND [ProviderBalance.refreshTrigger] re-fetches on every bump —
+ * e.g. when a streaming turn ends (consumption just happened) or the user
+ * edits the balance settings. Concurrent readouts of the same provider
+ * share one request via ProviderBalance's dedup window.
  */
 @Composable
 fun ProviderBalanceText(
@@ -32,14 +42,19 @@ fun ProviderBalanceText(
 ) {
     if (!instance.balanceEnabled) return
     val context = LocalContext.current
-    val value by produceState(
-        initialValue = null as String?,
-        key1 = instance.id,
-        key2 = instance.balanceEnabled,
-        key3 = instance.balanceApiPath,
-        key4 = instance.balanceResultPath,
-    ) {
-        value = ProviderBalance.fetchBalance(context, instance)
+    // Trigger tick — bumps when any consumption event says "re-fetch now".
+    val tick by ProviderBalance.refreshTrigger.collectAsState()
+    // Instant first paint from the last-known-good map.
+    var value by remember(instance.id) {
+        mutableStateOf(ProviderBalance.lastKnownBalance(instance))
+    }
+    LaunchedEffect(instance.id, instance.balanceApiPath, instance.balanceResultPath) {
+        value = ProviderBalance.lastKnownBalance(instance)
+    }
+    // Live fetch — runs on first composition and on every trigger bump.
+    LaunchedEffect(instance.id, instance.balanceEnabled, instance.balanceApiPath, instance.balanceResultPath, tick) {
+        val fresh = ProviderBalance.fetchBalance(context, instance)
+        if (fresh != null) value = fresh
     }
     if (value == null) return
 

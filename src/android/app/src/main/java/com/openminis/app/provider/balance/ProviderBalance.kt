@@ -5,11 +5,17 @@ import com.openminis.app.data.model.ProviderCredential
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.logging.AppLogger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
@@ -17,6 +23,14 @@ import java.util.concurrent.TimeUnit
  * (BalanceOption + OpenAIProvider.getBalance). Fetches GET {base}{apiPath}
  * with the instance credential, then reads the value out of the JSON body
  * with a dotted path expression ("data.total_usage", "balance[0].amount", …).
+ *
+ * Real-time strategy: NO time-based TTL. The last-known-good value is kept
+ * so the UI can render instantly on recomposition, and a global
+ * [refreshTrigger] StateFlow drives re-fetches — bumped by [invalidate()]
+ * whenever consumption may have changed (each streaming turn ends, config
+ * edits). Visible [ProviderBalanceText]s collect the trigger and re-fetch,
+ * with a 1-second dedup window + per-key Mutex so ten simultaneous
+ * recompositions of the same provider fire exactly one HTTP request.
  */
 object ProviderBalance {
     private const val TAG = "ProviderBalance"
@@ -25,79 +39,107 @@ object ProviderBalance {
         .readTimeout(15, TimeUnit.SECONDS)
         .build()
 
-    /** In-memory cache: instanceId -> balance string, 2 minutes. */
-    private val cache = HashMap<String, Pair<Long, String>>()
-    private var cacheTime = 0L
-    private val cacheTtlMs = 2 * 60 * 1000L
+    /** Bumped by [invalidate]; collectors re-fetch on change. */
+    private val _refreshTrigger = MutableStateFlow(0)
+    val refreshTrigger: StateFlow<Int> = _refreshTrigger.asStateFlow()
+
+    /** Last-known-good value per cache key — survives re-fetch failures. */
+    private val lastValue = ConcurrentHashMap<String, String>()
+    private val lastFetchTime = ConcurrentHashMap<String, Long>()
+
+    /** Per-key in-flight dedup so concurrent collectors share one request. */
+    private val fetchLocks = ConcurrentHashMap<String, Mutex>()
+
+    /** Window in which a second fetch for the same key reads the cache. */
+    private const val DEDUP_WINDOW_MS = 1000L
 
     /**
-     * Fetch (or pull from cache) the account balance for [instance].
+     * Ask every visible balance readout to re-fetch. Cheap (bump an Int);
+     * the actual requests are deduped in [fetchBalance].
+     */
+    fun invalidate() {
+        _refreshTrigger.value += 1
+    }
+
+    /** The last successfully fetched value, if any — for instant first paint. */
+    fun lastKnownBalance(instance: ProviderInstance): String? {
+        if (!instance.balanceEnabled) return null
+        return lastValue[cacheKey(instance)]
+    }
+
+    private fun cacheKey(instance: ProviderInstance): String =
+        "${instance.id}|${instance.balanceApiPath}|${instance.balanceResultPath}"
+
+    /**
+     * Fetch the account balance for [instance] — always live (no TTL), with
+     * a 1s dedup window so a trigger burst resolves to one request per key.
      * Returns a display string, or null when it can't be determined
-     * (disabled / no credential / request failed / path missing).
+     * (disabled / no credential / request failed / path missing). On failure
+     * the previous last-known value is NOT overwritten.
      */
     suspend fun fetchBalance(context: Context, instance: ProviderInstance): String? =
         withContext(Dispatchers.IO) {
             if (!instance.balanceEnabled) return@withContext null
-
-            // Cache — key includes the option fields so editing the config
-            // invalidates it.
-            val key = "${instance.id}|${instance.balanceApiPath}|${instance.balanceResultPath}"
-            synchronized(cache) {
-                if (cacheTime > 0 && System.currentTimeMillis() - cacheTime < cacheTtlMs) {
-                    cache[key]?.let { return@withContext it }
+            val key = cacheKey(instance)
+            val mutex = fetchLocks.computeIfAbsent(key) { Mutex() }
+            mutex.withLock {
+                // Dedup window: if an identical fetch just completed (e.g. the
+                // top bar and the model picker both recomposed on the same
+                // trigger bump), reuse it instead of hitting the API again.
+                val fetchedAt = lastFetchTime[key] ?: 0L
+                if (System.currentTimeMillis() - fetchedAt < DEDUP_WINDOW_MS) {
+                    return@withLock lastValue[key]
                 }
-            }
 
-            val token = balanceToken(context, instance) ?: run {
-                AppLogger.info(TAG, "No credential for ${instance.id} — balance skipped")
-                return@withContext null
-            }
+                val token = balanceToken(context, instance) ?: run {
+                    AppLogger.info(TAG, "No credential for ${instance.id} — balance skipped")
+                    return@withLock null
+                }
 
-            val url = buildURL(instance)
-            if (url == null) {
-                AppLogger.warning(TAG, "No base URL resolvable for ${instance.id} — balance skipped")
-                return@withContext null
-            }
+                val url = buildURL(instance)
+                if (url == null) {
+                    AppLogger.warning(TAG, "No base URL resolvable for ${instance.id} — balance skipped")
+                    return@withLock null
+                }
 
-            try {
-                val request = Request.Builder()
-                    .url(url)
-                    .header("Authorization", "Bearer $token")
-                    .get()
-                    .build()
-                client.newCall(request).execute().use { response ->
-                    val body = response.body?.string()
-                    if (!response.isSuccessful) {
-                        AppLogger.warning(
-                            TAG, "Balance request failed for ${instance.id}: " +
-                                "${response.code} url=$url",
-                        )
-                        return@withContext null
-                    }
-                    val bodyStr = body ?: return@withContext null
-                    val root = JSONObject(bodyStr)
-                    val raw = getByPath(root, instance.balanceResultPath)
-                        ?: run {
+                try {
+                    val request = Request.Builder()
+                        .url(url)
+                        .header("Authorization", "Bearer $token")
+                        .get()
+                        .build()
+                    client.newCall(request).execute().use { response ->
+                        val body = response.body?.string()
+                        if (!response.isSuccessful) {
                             AppLogger.warning(
-                                TAG, "Balance path '${instance.balanceResultPath}' " +
-                                    "not found for ${instance.id}",
+                                TAG, "Balance request failed for ${instance.id}: " +
+                                    "${response.code} url=$url",
                             )
-                            return@withContext null
+                            return@withLock null
                         }
-                    val display = formatValue(raw)
-                    AppLogger.info(
-                        TAG, "Balance for ${instance.id}: path=" +
-                            "'${instance.balanceResultPath}' value=$display",
-                    )
-                    synchronized(cache) {
-                        cache[key] = display
-                        cacheTime = System.currentTimeMillis()
+                        val bodyStr = body ?: return@withLock null
+                        val root = JSONObject(bodyStr)
+                        val raw = getByPath(root, instance.balanceResultPath)
+                            ?: run {
+                                AppLogger.warning(
+                                    TAG, "Balance path '${instance.balanceResultPath}' " +
+                                        "not found for ${instance.id}",
+                                )
+                                return@withLock null
+                            }
+                        val display = formatValue(raw)
+                        AppLogger.info(
+                            TAG, "Balance for ${instance.id}: path=" +
+                                "'${instance.balanceResultPath}' value=$display",
+                        )
+                        lastValue[key] = display
+                        lastFetchTime[key] = System.currentTimeMillis()
+                        display
                     }
-                    display
+                } catch (e: Exception) {
+                    AppLogger.warning(TAG, "Balance fetch error for ${instance.id}: ${e.message}")
+                    null
                 }
-            } catch (e: Exception) {
-                AppLogger.warning(TAG, "Balance fetch error for ${instance.id}: ${e.message}")
-                null
             }
         }
 
