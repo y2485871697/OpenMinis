@@ -144,7 +144,7 @@ object ProviderBalance {
         }
 
     /** Resolve the credential for the balance call: OAuth token or API key. */
-    private fun balanceToken(context: Context, instance: ProviderInstance): String? {
+    private suspend fun balanceToken(context: Context, instance: ProviderInstance): String? {
         if (instance.credentialType == ProviderCredential.oauth) {
             return try {
                 val manager = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
@@ -154,10 +154,19 @@ object ProviderBalance {
                 null
             }
         }
-        // Same pattern the UI uses to grab the repo from Compose land; null in
-        // safe-mode, which just means "no balance shown".
-        return com.openminis.app.MinisApp.instance?.providerRepositoryOrNull
-            ?.loadApiKey(instance.id)
+        // Read the key straight from the same encrypted store
+        // ProviderRepository.loadApiKey uses (apikey_<id> in "provider_secrets")
+        // — avoids needing a repository instance from a non-UI object.
+        // safeCreate is self-healing on corrupted master keys, so this cannot
+        // crash; a null key just means "no balance shown".
+        return try {
+            val prefs = com.openminis.app.util.EncryptedPrefsFactory
+                .safeCreate(context, "provider_secrets")
+            prefs.getString("apikey_${instance.id}", null)
+        } catch (e: Exception) {
+            AppLogger.warning(TAG, "Failed to read API key for ${instance.id}: ${e.message}")
+            null
+        }
     }
 
     /**
