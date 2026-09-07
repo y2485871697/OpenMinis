@@ -2583,6 +2583,14 @@ class ProviderRepository(private val context: Context) {
             // when set; old/new readers without the key decode to null →
             // default UA. Field name matches iOS for cross-platform interop.
             instance.customUserAgent?.takeIf { it.isNotBlank() }?.let { put("customUserAgent", it) }
+            // [T-android-provider-balance] Additive, optional — mirrors
+            // customUserAgent's export pattern. Only written when the feature
+            // is on so old exports stay byte-identical.
+            if (instance.balanceEnabled) {
+                put("balanceEnabled", true)
+                put("balanceApiPath", instance.balanceApiPath)
+                put("balanceResultPath", instance.balanceResultPath)
+            }
         }
         return obj.toString(2)
     }
@@ -2843,6 +2851,12 @@ class ProviderRepository(private val context: Context) {
         // [T-provider-custom-user-agent] Additive: old exports lack the key →
         // empty → null → default UA. Field name matches iOS.
         val customUserAgent = dict.optString("customUserAgent", "").ifEmpty { null }
+        // [T-android-provider-balance] Additive: old exports lack all three
+        // keys → disabled + model defaults, so importing an old file is a
+        // no-op for balance.
+        val balanceEnabled = dict.optBoolean("balanceEnabled", false)
+        val balanceApiPath = dict.optString("balanceApiPath", "").ifEmpty { "/credits" }
+        val balanceResultPath = dict.optString("balanceResultPath", "").ifEmpty { "data.total_usage" }
 
         val instance = ProviderInstance(
             id = java.util.UUID.randomUUID().toString(),
@@ -2853,6 +2867,9 @@ class ProviderRepository(private val context: Context) {
             appendV1Suffix = appendV1,
             useResponsesAPI = useResponsesAPI,
             customUserAgent = customUserAgent,
+            balanceEnabled = balanceEnabled,
+            balanceApiPath = balanceApiPath,
+            balanceResultPath = balanceResultPath,
         )
         addInstance(instance)
 

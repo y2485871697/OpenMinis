@@ -261,8 +261,7 @@ fun ProviderListScreen(
                                         apiKey = apiKey,
                                         isConfigured = isConfigured,
                                         onClick = { onProviderClick(instance.id) },
-                                    )
-                                }
+                                    )                                }
                             }
                             if (index < localOrder.size - 1) {
                                 val divider = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
@@ -392,8 +391,7 @@ private fun ProviderInstanceRow(
     apiKey: String?,
     isConfigured: Boolean,
     onClick: () -> Unit,
-) {
-    val isActive = isConfigured && instance.isEnabled
+) {    val isActive = isConfigured && instance.isEnabled
 
     Row(
         modifier = Modifier
@@ -454,6 +452,12 @@ private fun ProviderInstanceRow(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                 )
+            }
+            // Account balance readout (RikkaHub-style wallet icon + value).
+            // Renders nothing when disabled for this instance or the fetch
+            // failed; the value is cached 2 minutes in ProviderBalance.
+            if (instance.balanceEnabled) {
+                ProviderBalanceText(instance = instance)
             }
         }
 

@@ -964,6 +964,12 @@
     <string name="provider_detail_responses_api">Responses API</string>
     <string name="provider_detail_azure_openai">Azure OpenAI</string>
     <string name="provider_detail_azure_openai_footer">使用 Azure OpenAI 认证（api-key 请求头）。将完整的 Azure 端点（含 ?api-version=… 查询参数）粘贴到上面的自定义 API Base。两种 API 格式均可用。</string>
+    <string name="provider_detail_balance">账户余额</string>
+    <string name="provider_detail_balance_enabled">显示账户余额</string>
+    <string name="provider_detail_balance_footer">从提供商 API 获取账户余额并显示在提供商旁。适用于提供余额/额度查询接口的 OpenAI 兼容端点。</string>
+    <string name="provider_detail_balance_api_path">API 路径</string>
+    <string name="provider_detail_balance_json_path">JSON 路径</string>
+    <string name="provider_detail_balance_save">保存余额设置</string>
     <string name="provider_detail_status">状态</string>
     <string name="provider_detail_enabled">已启用</string>
     <string name="provider_detail_refresh_models">刷新模型</string>

@@ -130,6 +130,10 @@ fun ProviderDetailScreen(
     // [T-provider-custom-user-agent] Per-provider UA override input. Only the
     // OpenAI-/Anthropic-compat custom-base section surfaces it (see gate below).
     var customUserAgent by remember { mutableStateOf(instance.customUserAgent ?: "") }
+    // Account balance fields — local edit state, saved through the section's
+    // save action (mirrors the Custom API Base pattern).
+    var balanceApiPath by remember(instance.id) { mutableStateOf(instance.balanceApiPath) }
+    var balanceResultPath by remember(instance.id) { mutableStateOf(instance.balanceResultPath) }
 
     val entries = providerRepository.entriesFor(instanceId)
     var isRefreshing by remember { mutableStateOf(false) }
@@ -476,6 +480,97 @@ fun ProviderDetailScreen(
                             shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3),
                         ) { Text("Chat") }
                     }
+                }
+            }
+        }
+
+        // ─── Account Balance ────────────────────────────────────────
+        // Ported from RikkaHub's SettingProviderBalanceOption: a switch that
+        // gates a live balance readout plus two editable fields — the API path
+        // appended to the base URL and the dotted JSON path to read out of the
+        // response. Saved straight through on each edit (no Save step), same
+        // as every other switch on this screen.
+        SettingsSection(
+            header = stringResource(R.string.provider_detail_balance),
+            footer = stringResource(R.string.provider_detail_balance_footer),
+        ) {
+            SettingsSwitchRow(
+                title = stringResource(R.string.provider_detail_balance_enabled),
+                checked = instance.balanceEnabled,
+                onCheckedChange = { on ->
+                    providerRepository.updateInstance(instance.copy(balanceEnabled = on))
+                    AppLogger.info(TAG, "Set balanceEnabled=$on for ${instance.id}")
+                },
+                showDivider = true,
+            )
+            if (instance.balanceEnabled) {
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    Text(
+                        text = stringResource(R.string.provider_detail_balance_api_path),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    SectionTextField(
+                        value = balanceApiPath,
+                        onValueChange = { balanceApiPath = it },
+                        singleLine = true,
+                        placeholder = "/credits",
+                        fieldModifier = Modifier.bringIntoViewOnFocus(),
+                    )
+                }
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    thickness = 0.5.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                )
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    Text(
+                        text = stringResource(R.string.provider_detail_balance_json_path),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    SectionTextField(
+                        value = balanceResultPath,
+                        onValueChange = { balanceResultPath = it },
+                        singleLine = true,
+                        placeholder = "data.total_usage",
+                        fieldModifier = Modifier.bringIntoViewOnFocus(),
+                    )
+                }
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    thickness = 0.5.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                )
+                // Save action + live preview in one row: the wallet icon and
+                // fetched value sit next to the button so the user sees the
+                // effect of path edits immediately after saving.
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 44.dp)
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    MinisSmallTextButton(
+                        onClick = {
+                            providerRepository.updateInstance(
+                                instance.copy(
+                                    balanceApiPath = balanceApiPath.ifBlank { "/credits" },
+                                    balanceResultPath = balanceResultPath.ifBlank { "data.total_usage" },
+                                ),
+                            )
+                            AppLogger.info(
+                                TAG,
+                                "Saved balance settings for ${instance.id}: " +
+                                    "path='$balanceApiPath' resultPath='$balanceResultPath'",
+                            )
+                        },
+                    ) {
+                        Text(stringResource(R.string.provider_detail_balance_save))
+                    }
+                    Spacer(modifier = Modifier.weight(1f))
+                    // Live readout — recomposes on save because instance
+                    // (the produceState key source) comes from config flow.
+                    ProviderBalanceText(instance = instance)
                 }
             }
         }

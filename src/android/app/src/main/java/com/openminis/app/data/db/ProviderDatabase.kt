@@ -36,7 +36,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ProviderConfigMetaEntity::class,
         ProviderThinkingRuleEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 abstract class ProviderDatabase : RoomDatabase() {
@@ -105,6 +105,22 @@ abstract class ProviderDatabase : RoomDatabase() {
         }
 
 
+        /**
+         * [T-android-provider-balance] Add the account-balance columns
+         * (RikkaHub port): 0/1 enable switch + the API path and JSON result
+         * path strings. Pure additive ALTERs; existing rows read as disabled
+         * with the code defaults ("/credits" / "data.total_usage") applied at
+         * the model layer, matching the JSON model's declared defaults.
+         */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE provider_instances ADD COLUMN balance_enabled INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE provider_instances ADD COLUMN balance_api_path TEXT")
+                db.execSQL("ALTER TABLE provider_instances ADD COLUMN balance_result_path TEXT")
+            }
+        }
+
+
         fun getInstance(context: Context): ProviderDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -112,7 +128,7 @@ abstract class ProviderDatabase : RoomDatabase() {
                     ProviderDatabase::class.java,
                     "provider.db",
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .build()
                     .also { INSTANCE = it }
             }

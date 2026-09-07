@@ -90,6 +90,11 @@ fun ProviderConfig.toSnapshot(
             imageEndpointMode = inst.imageEndpointMode.name,
             imageEndpointResolved = inst.imageEndpointResolved?.name,
             customUserAgent = inst.customUserAgent,
+            // [T-android-provider-balance] Persist the RikkaHub-style balance
+            // option alongside the other per-instance switches.
+            balanceEnabled = if (inst.balanceEnabled) 1 else 0,
+            balanceApiPath = inst.balanceApiPath,
+            balanceResultPath = inst.balanceResultPath,
             isEnabled = if (inst.isEnabled) 1 else 0,
             sortOrder = idx,
             createdAt = inst.createdAt,
@@ -216,6 +221,12 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
             imageEndpointResolved = row.imageEndpointResolved?.let { m ->
                 runCatching { ImageEndpointMode.valueOf(m) }.getOrNull()
             },
+            // [T-android-provider-balance] Null-safe read: pre-migration rows
+            // (and rows written by a downgraded build) fall back to the model
+            // defaults — disabled, "/credits", "data.total_usage".
+            balanceEnabled = row.balanceEnabled != 0,
+            balanceApiPath = row.balanceApiPath ?: "/credits",
+            balanceResultPath = row.balanceResultPath ?: "data.total_usage",
         )
     }.toMutableList()
 

@@ -1054,6 +1054,12 @@
     <string name="provider_detail_responses_api">Responses API</string>
     <string name="provider_detail_azure_openai">Azure OpenAI</string>
     <string name="provider_detail_azure_openai_footer">Use Azure OpenAI authentication (api-key header). Paste your full Azure endpoint into Custom API Base above, including the ?api-version=… query. Works with both API formats.</string>
+    <string name="provider_detail_balance">Account Balance</string>
+    <string name="provider_detail_balance_enabled">Show account balance</string>
+    <string name="provider_detail_balance_footer">Fetches the account balance from the provider API and displays it next to the provider. Works with OpenAI-compatible endpoints that expose a balance/credits API.</string>
+    <string name="provider_detail_balance_api_path">API Path</string>
+    <string name="provider_detail_balance_json_path">JSON Path</string>
+    <string name="provider_detail_balance_save">Save Balance Settings</string>
     <string name="provider_detail_status">Status</string>
     <string name="provider_detail_enabled">Enabled</string>
     <string name="provider_detail_refresh_models">Refresh Models</string>

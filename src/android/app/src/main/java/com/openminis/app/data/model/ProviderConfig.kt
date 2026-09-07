@@ -253,6 +253,14 @@ data class ProviderInstance(
     // matches iOS for cross-platform export/import interop.
     var azureMode: Boolean = false,
 
+    // Account balance display (ported from RikkaHub's BalanceOption). When
+    // enabled, the provider list/detail rows fetch GET {base}{balanceApiPath}
+    // with the instance credential and show the value at balanceResultPath
+    // next to a wallet icon. Defaults keep old persisted JSON round-tripping
+    // cleanly (kotlinx.serialization fills missing keys with these values).
+    var balanceEnabled: Boolean = false,
+    var balanceApiPath: String = "/credits",
+    var balanceResultPath: String = "data.total_usage",
 ) {
     /** Returns the effective API base URL, applying v1 suffix if configured. */
     val effectiveBaseURL: String?

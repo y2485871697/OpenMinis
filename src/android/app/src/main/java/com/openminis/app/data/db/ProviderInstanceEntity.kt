@@ -31,6 +31,11 @@ data class ProviderInstanceEntity(
     @ColumnInfo(name = "image_endpoint_mode") val imageEndpointMode: String? = null,
     @ColumnInfo(name = "image_endpoint_resolved") val imageEndpointResolved: String? = null,
     @ColumnInfo(name = "custom_user_agent") val customUserAgent: String? = null,
+    // Account balance display (RikkaHub port). 0/1 switch + the two editable
+    // strings; nullable-safe so pre-migration rows read as disabled/defaults.
+    @ColumnInfo(name = "balance_enabled") val balanceEnabled: Int = 0,
+    @ColumnInfo(name = "balance_api_path") val balanceApiPath: String? = null,
+    @ColumnInfo(name = "balance_result_path") val balanceResultPath: String? = null,
     @ColumnInfo(name = "is_enabled") val isEnabled: Int = 1,
     @ColumnInfo(name = "sort_order") val sortOrder: Int = 0,
     @ColumnInfo(name = "created_at") val createdAt: Long,
