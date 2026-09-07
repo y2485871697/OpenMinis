@@ -2888,15 +2888,18 @@ fun ChatScreen(
                     // [T-android-provider-balance] Wallet icon + balance value
                     // for the ACTIVE provider, right of the title block and
                     // left of the "..." menu. Gated on the Appearance toggle
-                    // (default ON) AND the provider's own balance option —
-                    // resolves the instance from activeEntryId so automatic
-                    // failover updates the readout along with the model row.
+                    // (default ON) AND the provider's own balance option.
+                    // We resolve the instance outside the TopAppBar actions
+                    // recomposition path so the full bar doesn't recompose on
+                    // every balance refresh tick.
                     if (showTopBarBalance) {
-                        val activeEntryIdTopBar by viewModel.activeEntryId.collectAsState()
-                        val configTopBar by providerRepository.config.collectAsState()
-                        val activeInstance = activeEntryIdTopBar?.let { entryId ->
-                            configTopBar.modelEntries.find { it.id == entryId }
-                                ?.let { entry -> configTopBar.instances.find { it.id == entry.providerInstanceId } }
+                        val activeEntryId by viewModel.activeEntryId.collectAsState()
+                        val config by providerRepository.config.collectAsState()
+                        val activeInstance = remember(activeEntryId, config) {
+                            activeEntryId?.let { entryId ->
+                                config.modelEntries.find { it.id == entryId }
+                                    ?.let { entry -> config.instances.find { it.id == entry.providerInstanceId } }
+                            }
                         }
                         if (activeInstance != null && activeInstance.balanceEnabled) {
                             ProviderBalanceText(instance = activeInstance)
