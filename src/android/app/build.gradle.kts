@@ -89,11 +89,13 @@ android {
         // broken upgrade path, not key theft).
         create("release") {
             val ksProps = Properties()
-            val ksFile = rootProject.file("keystore/keystore.properties")
+            val ksFile = rootProject.file("../keystore/keystore.properties")
             if (ksFile.exists()) {
                 ksFile.inputStream().use { ksProps.load(it) }
             }
-            storeFile = rootProject.file("keystore/minis-fork-release.keystore")
+            // Keystore lives at repo root /keystore/ — rootProject here is
+            // src/android/, so walk up one level.
+            storeFile = rootProject.file("../keystore/minis-fork-release.keystore")
             storePassword = ksProps.getProperty("storePassword", "minisfork")
             keyAlias = ksProps.getProperty("keyAlias", "minisfork")
             keyPassword = ksProps.getProperty("keyPassword", "minisfork")
@@ -250,9 +252,9 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.8.5")
 
     // Room
-    implementation("androidx.room:room-runtime:2.6.1")
-    implementation("androidx.room:room-ktx:2.6.1")
-    ksp("androidx.room:room-compiler:2.6.1")
+    implementation("androidx.room:room-runtime:2.8.4")
+    implementation("androidx.room:room-ktx:2.8.4")
+    ksp("androidx.room:room-compiler:2.8.4")
 
     // DataStore
     implementation("androidx.datastore:datastore-preferences:1.1.1")
@@ -337,7 +339,7 @@ dependencies {
     // [T-android-downgrade-compat] MigrationTestHelper replays the committed
     // schema json to prove every migration — upgrade AND the no-op downgrade —
     // still lands on the schema the entities expect.
-    androidTestImplementation("androidx.room:room-testing:2.6.1")
+    androidTestImplementation("androidx.room:room-testing:2.8.4")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:rules:1.6.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
