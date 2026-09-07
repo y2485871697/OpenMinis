@@ -100,6 +100,12 @@ jobs:
           exec sha256sum "$@"
           SHIM
           sudo chmod +x /usr/local/bin/shasum
+          # Debug: confirm the vendored loaders actually landed on disk after
+          # checkout (the sha256 pin check below reads them straight from the
+          # working tree).
+          ls -la src/android/app/src/main/jniLibs/arm64-v8a/ || true
+          git ls-files src/android/app/src/main/jniLibs/ || true
+          git check-ignore -v src/android/app/src/main/jniLibs/arm64-v8a/libproot-loader.so || echo "not ignored"
           ./deps/build_proot.sh
 
       # ── Stage 2: Alpine rootfs asset ──────────────────────────────────
