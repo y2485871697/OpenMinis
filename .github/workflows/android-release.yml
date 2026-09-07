@@ -100,6 +100,10 @@ jobs:
           exec sha256sum "$@"
           SHIM
           sudo chmod +x /usr/local/bin/shasum
+          # Debug the shim itself
+          cat /usr/local/bin/shasum || true
+          shasum -a 256 src/android/app/src/main/jniLibs/arm64-v8a/libproot-loader.so || echo "SHASUM-FAILED rc=$?"
+          which shasum sha256sum || true
           # Debug: confirm the vendored loaders actually landed on disk after
           # checkout (the sha256 pin check below reads them straight from the
           # working tree).
