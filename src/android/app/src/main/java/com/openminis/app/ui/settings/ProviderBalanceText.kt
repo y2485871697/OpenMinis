@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -13,9 +12,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -26,7 +23,6 @@ import com.openminis.app.R
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.provider.balance.ProviderBalance
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /**
  * Wallet icon + balance text, mirroring RikkaHub's ProviderBalanceText.
@@ -49,18 +45,15 @@ fun ProviderBalanceText(
     if (!instance.balanceEnabled) return
     val context = LocalContext.current
     val tick by ProviderBalance.refreshTrigger.collectAsState()
-    val value by produceState(
-        initialValue = "~",
-        key1 = instance.id,
-        key2 = instance.balanceApiPath,
-        key3 = instance.balanceResultPath,
-        key4 = tick,
-    ) {
-        // [T-android-provider-balance-anr] Defer the first fetch so mount
-        // storms don't all hit Keystore + network in the same frame.
+    var value by remember { mutableStateOf<String?>(ProviderBalance.lastKnownBalance(instance)) }
+
+    // Resolve-re-fetch key: bump whenever the config or the global trigger
+    // changes. Runs on first mount (after a short delay) and on each trigger.
+    LaunchedEffect(instance.id, instance.balanceApiPath, instance.balanceResultPath, tick) {
         delay(300)
-        value = ProviderBalance.fetchBalance(context, instance) ?: "~"
+        value = ProviderBalance.fetchBalance(context, instance)
     }
+
     if (value == null) return
 
     Row(
