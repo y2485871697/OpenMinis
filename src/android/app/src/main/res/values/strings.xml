@@ -686,6 +686,10 @@
     <string name="appearance_show_chat_title">Show chat title</string>
     <string name="appearance_show_chat_title_subtitle">Show a sticky title pill while scrolling</string>
     <string name="appearance_show_chat_title_footer">Display the current session title as a floating pill at the top of the chat while scrolling through history.</string>
+    <string name="appearance_section_top_bar_balance">Top Bar Balance</string>
+    <string name="appearance_top_bar_balance">Show provider balance in top bar</string>
+    <string name="appearance_top_bar_balance_subtitle">Wallet icon + balance next to the chat title</string>
+    <string name="appearance_top_bar_balance_footer">Display the account balance of the active provider (wallet icon + value) on the chat top bar and in the model picker, next to the provider name. Only providers with the balance option enabled in their settings show a balance.</string>
     <string name="chat_title_pill_session_default">Untitled</string>
     <string name="appearance_section_grouping">Grouping</string>
     <string name="appearance_auto_grouping">Auto-Grouping</string>

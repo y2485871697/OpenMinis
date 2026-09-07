@@ -285,6 +285,7 @@ import com.openminis.app.data.repository.MemoryRepository
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.ui.browser.BrowserSheet
 import com.openminis.app.ui.theme.ChatColors
+import com.openminis.app.ui.settings.ProviderBalanceText
 import com.openminis.app.ui.components.MinisTextButton
 
 // iOS ChatColors equivalent
@@ -2282,6 +2283,10 @@ fun ChatScreen(
     // T-chat-title-pill: live-toggled by Settings → Appearance and by
     // `minis-config set appearance.show_chat_title …`. Default ON.
     var showChatTitlePill by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_CHAT_TITLE, true)) }
+    // [T-android-provider-balance] Top-bar balance readout switch, same
+    // live-toggle pattern as the title pill above. Default ON; only
+    // providers with their own balance option enabled show anything.
+    var showTopBarBalance by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_TOP_BAR_BALANCE, true)) }
     // T-chat-title-pill-edit: state for the in-chat edit-title sheet (the
     // exact same SessionEditSheet hosted by the session list home screen,
     // reused via `internal` visibility — no duplicate UI). Populated by an
@@ -2294,6 +2299,7 @@ fun ChatScreen(
                 com.openminis.app.ui.settings.KEY_FONT_CHAT_INPUT -> chatInputLevel = sp.getInt(key, 0)
                 com.openminis.app.ui.settings.KEY_TOOL_PREVIEW -> toolPreviewEnabled = sp.getBoolean(key, true)
                 com.openminis.app.ui.settings.KEY_SHOW_CHAT_TITLE -> showChatTitlePill = sp.getBoolean(key, true)
+                com.openminis.app.ui.settings.KEY_SHOW_TOP_BAR_BALANCE -> showTopBarBalance = sp.getBoolean(key, true)
             }
         }
         appearancePrefs.registerOnSharedPreferenceChangeListener(listener)
@@ -2866,6 +2872,23 @@ fun ChatScreen(
                     }
                 },
                 actions = {
+                    // [T-android-provider-balance] Wallet icon + balance value
+                    // for the ACTIVE provider, right of the title block and
+                    // left of the "..." menu. Gated on the Appearance toggle
+                    // (default ON) AND the provider's own balance option —
+                    // resolves the instance from activeEntryId so automatic
+                    // failover updates the readout along with the model row.
+                    if (showTopBarBalance) {
+                        val activeEntryIdTopBar by viewModel.activeEntryId.collectAsState()
+                        val configTopBar by providerRepository.config.collectAsState()
+                        val activeInstance = activeEntryIdTopBar?.let { entryId ->
+                            configTopBar.modelEntries.find { it.id == entryId }
+                                ?.let { entry -> configTopBar.instances.find { it.id == entry.providerInstanceId } }
+                        }
+                        if (activeInstance != null && activeInstance.balanceEnabled) {
+                            ProviderBalanceText(instance = activeInstance)
+                        }
+                    }
                     // iOS: "..." circle button → dropdown menu
                     Box {
                         IconButton(onClick = { showChatMenu = true }) {

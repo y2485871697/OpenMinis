@@ -616,6 +616,10 @@
     <string name="appearance_show_chat_title">显示会话标题</string>
     <string name="appearance_show_chat_title_subtitle">滚动时显示当前会话标题</string>
     <string name="appearance_show_chat_title_footer">滚动浏览历史消息时，在聊天顶部以悬浮胶囊形式显示当前会话标题。</string>
+    <string name="appearance_section_top_bar_balance">标题栏余额</string>
+    <string name="appearance_top_bar_balance">在标题栏显示提供商余额</string>
+    <string name="appearance_top_bar_balance_subtitle">聊天标题旁显示钱包图标和余额</string>
+    <string name="appearance_top_bar_balance_footer">在聊天标题栏和模型选择器中提供商名称旁，显示当前提供商的账户余额（钱包图标 + 数值）。仅对在提供商设置中开启余额选项的提供商生效。</string>
     <string name="chat_title_pill_session_default">未命名会话</string>
     <string name="appearance_section_grouping">分组</string>
     <string name="appearance_auto_grouping">自动归类</string>

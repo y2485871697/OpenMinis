@@ -144,6 +144,7 @@ import com.openminis.app.logging.AppLogger
 import com.openminis.app.ui.components.MinisAlertDialog
 import com.openminis.app.ui.components.MinisMenu
 import com.openminis.app.ui.components.MinisMenuDivider
+import com.openminis.app.ui.settings.ProviderBalanceText
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -943,6 +944,17 @@ internal fun ModelPickerSheet(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.weight(1f),
                                     )
+                                    // [T-android-provider-balance] Wallet icon +
+                                    // cached balance value, right of the provider
+                                    // name and left of the collapse chevron —
+                                    // mirrors the top-bar placement. Only
+                                    // providers with the balance option enabled
+                                    // render anything (ProviderBalanceText also
+                                    // self-hides on fetch failure).
+                                    if (instance.balanceEnabled) {
+                                        ProviderBalanceText(instance = instance)
+                                        Spacer(Modifier.width(8.dp))
+                                    }
                                     // [T-android-model-picker-polish] Same
                                     // neutral treatment as the group chevron
                                     // above — see that comment for why the

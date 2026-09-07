@@ -32,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardReturn
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.outlined.AccountBalanceWallet
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.BrightnessAuto
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
@@ -94,6 +95,11 @@ const val KEY_AUTO_FOCUS_AFTER_REPLY = "chat.autoFocusAfterReply"  // Boolean, d
 // (matches iOS @AppStorage("appearance.show_chat_title")) so future config
 // sync reads the same value.
 const val KEY_SHOW_CHAT_TITLE = "appearance.show_chat_title"  // Boolean, default true
+// [T-android-provider-balance] Top-bar balance readout (wallet icon + value,
+// right of the title / left of the "..." menu). Mirrors the show-chat-title
+// switch: SharedPreferences-backed so Settings → Appearance and
+// `minis-config set appearance.show_top_bar_balance …` both live-toggle it.
+const val KEY_SHOW_TOP_BAR_BALANCE = "appearance.show_top_bar_balance"  // Boolean, default true
 // [T-thinking-auto-expand-toggle] When true (default, historical behavior) a
 // NEW streaming thinking block auto-expands while the model reasons; when false
 // it stays collapsed until tapped. Key name mirrors iOS
@@ -262,6 +268,7 @@ fun AppearanceScreen(
     var autoFocusAfterReply by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_FOCUS_AFTER_REPLY, true)) }
     var autoExpandThinking by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_EXPAND_THINKING, true)) }
     var showChatTitle by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_CHAT_TITLE, true)) }
+    var showTopBarBalance by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_TOP_BAR_BALANCE, true)) }
     var autoGrouping by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_GROUPING, true)) }
     var chatInputLevel by remember { mutableIntStateOf(prefs.getInt(KEY_FONT_CHAT_INPUT, 0)) }
     var messageLevel by remember { mutableIntStateOf(prefs.getInt(KEY_FONT_MESSAGE, 0)) }
@@ -490,6 +497,30 @@ fun AppearanceScreen(
                 onCheckedChange = {
                     showChatTitle = it
                     prefs.edit().putBoolean(KEY_SHOW_CHAT_TITLE, it).apply()
+                },
+                showDivider = false,
+            )
+        }
+
+        // -- Top Bar Balance (T-android-provider-balance) --
+        // Wallet icon + balance value on the chat top bar (right of the
+        // title, left of the "..." menu) and in the model picker's provider
+        // headers. Only providers with the per-instance "Show account
+        // balance" option enabled participate. Default ON so the feature is
+        // visible once a provider opts in; off hides it everywhere in chat.
+        SettingsSection(
+            header = stringResource(R.string.appearance_section_top_bar_balance),
+            footer = stringResource(R.string.appearance_top_bar_balance_footer),
+        ) {
+            SettingsSwitchRow(
+                icon = Icons.Outlined.AccountBalanceWallet,
+                iconColor = tileBlue,
+                title = stringResource(R.string.appearance_top_bar_balance),
+                subtitle = stringResource(R.string.appearance_top_bar_balance_subtitle),
+                checked = showTopBarBalance,
+                onCheckedChange = {
+                    showTopBarBalance = it
+                    prefs.edit().putBoolean(KEY_SHOW_TOP_BAR_BALANCE, it).apply()
                 },
                 showDivider = false,
             )
