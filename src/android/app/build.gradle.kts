@@ -132,6 +132,17 @@ android {
         noCompress += listOf("tar.gz", "proot-aarch64")
     }
 
+    packagingOptions {
+        // [toolchain-2026] AGP 9 forbids android:extractNativeLibs="true" in
+        // the manifest. The original Minis source keeps it in the manifest
+        // for historical reasons (proot loader .so executables need to be
+        // extracted to nativeLibraryDir); moving the flag here silences the
+        // AGP 9 packaging error while preserving the same runtime behaviour.
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
