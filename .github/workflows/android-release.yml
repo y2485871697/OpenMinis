@@ -1,0 +1,167 @@
+name: Android Release Build
+
+# Builds the release APK entirely on GitHub Actions — no local toolchain
+# needed. Produces:
+#   MinisFork-v1.14-arm64-release.apk  (signed with the FIXED repo keystore)
+#
+# The fixed keystore (keystore/minis-fork-release.keystore) is committed, so
+# every run — this repo, any fork of it, any runner — signs identically and
+# the resulting APK upgrade-installs over any previous fork build.
+#
+# Toolchain (latest stable line, checked 2026-09):
+#   Gradle 9.7.1 (wrapper) / AGP 9.4.0 / Kotlin 2.3.21 / KSP2 2.3.11
+#   JDK 21 to run Gradle (AGP 9 floor; still emits Java 17 bytecode)
+#   NDK 29.0.14206865 + CMake for the small JNI libs and the PRoot build
+#
+# Build stages, mirroring BUILDING.md:
+#   1. checkout (with submodules — deps/proot is a submodule)
+#   2. deps/build_proot.sh          → assets/proot-aarch64 + jniLibs/libproot.so
+#      (vendored Termux loaders are already tracked in git; script only
+#      verifies their sha256)
+#   3. scripts/prepare_android_sandbox.sh → assets/alpine-minirootfs.tar.gz
+#   4. rclone.aar via Go + gomobile (deps/build_rclone_android.sh)
+#   5. ./gradlew :app:assembleRelease
+#
+# Triggers: manual dispatch, push to main touching Android sources, or tag v*.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build type"
+        required: false
+        default: "release"
+        type: choice
+        options:
+          - release
+          - debug
+  push:
+    branches: [main]
+    paths:
+      - "src/android/**"
+      - "deps/**"
+      - "scripts/prepare_android_sandbox.sh"
+      - ".github/workflows/android-release.yml"
+  pull_request:
+    paths:
+      - "src/android/**"
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Release APK (arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g"
+      ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/29.0.14206865
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          # Cache the wrapper dists + ~/.gradle/caches keyed on the lockfiles.
+          cache-read-only: false
+
+      - name: Set up Go (for rclone.aar via gomobile)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+
+      # ── Stage 1: PRoot sandbox binary ─────────────────────────────────
+      # build_proot.sh cross-compiles libtalloc + proot with the NDK and
+      # installs into src/android/app/src/main/. It also sha256-verifies the
+      # vendored Termux loaders that are tracked in git.
+      - name: Build PRoot (NDK)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq binutils-aarch64-linux-gnu xz-utils
+          # build_proot.sh calls `shasum` (a macOS tool); Ubuntu ships
+          # sha256sum. Install a shim on PATH rather than patching the
+          # script — keeps it byte-identical to upstream.
+          sudo tee /usr/local/bin/shasum > /dev/null <<'SHIM'
+          #!/bin/sh
+          exec sha256sum "$@"
+          SHIM
+          sudo chmod +x /usr/local/bin/shasum
+          ./deps/build_proot.sh
+
+      # ── Stage 2: Alpine rootfs asset ──────────────────────────────────
+      - name: Prepare Alpine sandbox assets
+        run: |
+          sudo apt-get install -y -qq binutils zstd
+          ./scripts/prepare_android_sandbox.sh
+
+      # ── Stage 3: rclone.aar ────────────────────────────────────────────
+      # gomobile bind of deps/rclone-mobile → app/libs/rclone.aar.
+      - name: Build rclone.aar (gomobile)
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+          ./deps/build_rclone_android.sh
+          mkdir -p src/android/app/libs
+          cp deps/build/rclone/rclone.aar src/android/app/libs/rclone.aar
+
+      # ── Stage 4: Gradle release build ─────────────────────────────────
+      - name: Build release APK
+        working-directory: src/android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --stacktrace --no-daemon
+
+      # ── Stage 5: verify + publish ─────────────────────────────────────
+      - name: Verify APK signature
+        run: |
+          APK=$(ls src/android/app/build/outputs/apk/release/*.apk | head -1)
+          echo "APK: $APK"
+          ls -lh "$APK"
+          # aapt from the runner's SDK build-tools dumps the package id —
+          # confirm the coexist suffix actually landed in the manifest.
+          AAPT=$(ls $ANDROID_HOME/build-tools/*/aapt2 | sort -V | tail -1)
+          "$AAPT" dump badging "$APK" | grep -E "^package:" || true
+          # apksigner verify prints the signer cert; fail if unsigned.
+          APKSIGNER=$(ls $ANDROID_HOME/build-tools/*/apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs "$APK" | head -5
+
+      - name: Rename artifact
+        run: |
+          APK=$(ls src/android/app/build/outputs/apk/release/*.apk | head -1)
+          VERSION=$(grep -oE 'versionName = "[^"]+"' src/android/app/build.gradle.kts | head -1 | cut -d'"' -f2)
+          [ -n "$VERSION" ] || VERSION="dev"
+          cp "$APK" "MinisFork-v${VERSION}-arm64-release.apk"
+          ls -lh MinisFork-*.apk
+
+      - name: Upload APK (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MinisFork-arm64-release
+          path: MinisFork-*.apk
+          if-no-files-found: error
+          compression-level: 0
+
+      # Tag pushes (v*) also publish a GitHub Release with the APK attached,
+      # so in-app update checks against this repo find it.
+      - name: Create GitHub Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MinisFork-*.apk
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

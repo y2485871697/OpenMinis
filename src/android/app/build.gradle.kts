@@ -33,11 +33,17 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.openminis.app"
+        // [fork-coexist] Suffix the applicationId so this fork installs
+        // ALONGSIDE the official Minis app (different package = independent
+        // sandbox, no signature clash on upgrade). namespace stays
+        // com.openminis.app so all source/Manifest references are untouched;
+        // every provider authority uses the ${applicationId} placeholder and
+        // resolves to the suffixed id automatically.
+        applicationId = "com.openminis.app.fork"
         minSdk = 26
         targetSdk = 35
-        versionCode = 25
-        versionName = "1.13"
+        versionCode = 26
+        versionName = "1.14"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -68,6 +74,29 @@ android {
         }
     }
 
+    signingConfigs {
+        // [fork-stable-signing] FIXED keystore committed at
+        // keystore/minis-fork-release.keystore so every CI build signs with
+        // the same key — a new APK can upgrade-install over any older build
+        // (Android requires identical signatures for in-place updates).
+        // Generated once with keytool (see .github/workflows/android-release.yml
+        // header for the regeneration command; passwords live in
+        // keystore/keystore.properties, also committed — this is a public
+        // signing key by design: the threat model for a sideloaded fork is a
+        // broken upgrade path, not key theft).
+        create("release") {
+            val ksProps = Properties()
+            val ksFile = rootProject.file("keystore/keystore.properties")
+            if (ksFile.exists()) {
+                ksFile.inputStream().use { ksProps.load(it) }
+            }
+            storeFile = rootProject.file("keystore/minis-fork-release.keystore")
+            storePassword = ksProps.getProperty("storePassword", "minisfork")
+            keyAlias = ksProps.getProperty("keyAlias", "minisfork")
+            keyPassword = ksProps.getProperty("keyPassword", "minisfork")
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -75,7 +104,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
@@ -84,8 +113,11 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
+    // [toolchain-2026] AGP 9 removed the kotlinOptions{} DSL; the Kotlin
+    // Android plugin's compilerOptions (Kotlin 2.3) is the replacement.
+    // JVM target stays 17 so the on-device art profile is unchanged.
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 
     buildFeatures {
